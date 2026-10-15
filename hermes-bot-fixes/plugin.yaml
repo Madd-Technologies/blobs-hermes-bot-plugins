@@ -1,0 +1,7 @@
+name: hermes-bot-fixes
+version: 0.1.0
+description: Local fixes for Hermes 0.21.x on a Bot Screen host - screenshots skip desktop panels and wait for the screen to settle, and a guard repairs SQLite files whose header was overwritten by a stray TLS record.
+author: Madd Technologies
+kind: standalone
+provides_hooks:
+  - pre_tool_call

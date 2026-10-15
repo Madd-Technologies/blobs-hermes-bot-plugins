@@ -1,0 +1,9 @@
+{
+  "name": "hermes-drive",
+  "label": "Drive",
+  "description": "Streams Google Drive files to the HermesBot app's viewer.",
+  "version": "0.1.0",
+  "tab": { "path": "/hermes-drive", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

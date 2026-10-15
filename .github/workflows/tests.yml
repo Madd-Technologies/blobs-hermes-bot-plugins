@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        plugin: [hermes-bot-mobile, hermes-paperless, hermes-drive, hermes-dashboard, hermes-bot-fixes]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install fastapi httpx pyyaml cryptography
+      - run: python -m unittest discover -s ${{ matrix.plugin }}/tests

@@ -1,0 +1,12 @@
+{
+  "name": "hermes-dashboard",
+  "label": "Dashboards",
+  "description": "Collections each bot keeps for you (its own fields, a status, history), shown as panels in the HermesBot app.",
+  "version": "0.3.0",
+  "tab": {
+    "path": "/hermes-dashboard",
+    "hidden": true
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

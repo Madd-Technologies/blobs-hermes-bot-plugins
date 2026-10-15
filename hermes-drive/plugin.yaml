@@ -1,0 +1,6 @@
+name: hermes-drive
+version: 0.1.0
+description: Lets the HermesBot app show Google Drive files a bot finds, streamed through this server with its Google sign-in; nothing is saved here or on the phone.
+author: Madd Technologies
+kind: standalone
+provides_hooks: []

@@ -1,0 +1,11 @@
+{
+  "name": "hermes-paperless",
+  "label": "Paperless",
+  "description": "Search Paperless-ngx and view documents, streamed through this server; the HermesBot app's viewer uses the same routes.",
+  "icon": "FileText",
+  "version": "0.3.0",
+  "tab": { "path": "/paperless", "position": "after:files" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

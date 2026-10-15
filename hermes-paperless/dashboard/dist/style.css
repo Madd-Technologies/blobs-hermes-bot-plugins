@@ -1,0 +1,178 @@
+/*
+ * hermes-paperless dashboard tab. Colors come from the dashboard theme's variables, so it follows any theme.
+ */
+
+.hermes-paperless {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  height: calc(100vh - 140px);
+  min-height: 480px;
+}
+
+.hermes-paperless .hp-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--color-foreground);
+}
+
+.hermes-paperless .hp-sub,
+.hermes-paperless .hp-list-head,
+.hermes-paperless .hp-row-meta,
+.hermes-paperless .hp-viewer-note {
+  color: var(--color-muted-foreground);
+  font-size: 0.875rem;
+}
+
+.hermes-paperless .hp-setup {
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-card);
+  color: var(--color-foreground);
+  max-width: 640px;
+}
+
+.hermes-paperless .hp-search {
+  max-width: 480px;
+}
+
+.hermes-paperless .hp-body {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 860px) {
+  .hermes-paperless {
+    height: auto;
+  }
+
+  .hermes-paperless .hp-body {
+    grid-template-columns: 1fr;
+  }
+
+  .hermes-paperless .hp-viewer {
+    min-height: 70vh;
+  }
+}
+
+.hermes-paperless .hp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.hermes-paperless .hp-list-head {
+  padding: 0 10px 6px;
+}
+
+.hermes-paperless .hp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--color-foreground);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hermes-paperless .hp-row:hover {
+  background: var(--color-card);
+}
+
+.hermes-paperless .hp-row-active,
+.hermes-paperless .hp-row-active:hover {
+  background: var(--color-card);
+  box-shadow: inset 2px 0 0 var(--color-ring);
+}
+
+.hermes-paperless .hp-row:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: -2px;
+}
+
+.hermes-paperless .hp-row-title {
+  font-weight: 500;
+}
+
+.hermes-paperless .hp-row-snippet {
+  color: var(--color-muted-foreground);
+  font-size: 0.8125rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.hermes-paperless .hp-viewer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-card);
+  overflow: hidden;
+}
+
+.hermes-paperless .hp-viewer-empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--color-muted-foreground);
+}
+
+.hermes-paperless .hp-viewer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.hermes-paperless .hp-viewer-title {
+  font-weight: 500;
+  color: var(--color-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-paperless .hp-viewer-note {
+  padding: 16px;
+}
+
+.hermes-paperless .hp-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.hermes-paperless .hp-image {
+  flex: 1;
+  min-height: 0;
+  object-fit: contain;
+  padding: 12px;
+}
+
+/* Themes may paint every <pre>; this one is a document's text on the card. */
+.hermes-paperless .hp-text {
+  flex: 1;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: transparent !important;
+  color: var(--color-foreground);
+  font-size: 0.8125rem;
+}

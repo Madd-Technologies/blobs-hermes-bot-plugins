@@ -1,0 +1,11 @@
+name: hermes-dashboard
+version: 0.3.1
+description: Collections each bot designs and keeps for its person (its own fields, a status, history), shown as panels in the HermesBot app; a skill teaches bots to build them from any data and keep them fresh.
+author: Madd Technologies
+kind: standalone
+provides_tools:
+  - dashboard_collection
+  - dashboard_record
+  - dashboard_query
+  - dashboard_view
+provides_hooks: []

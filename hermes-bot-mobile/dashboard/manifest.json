@@ -1,0 +1,9 @@
+{
+  "name": "hermes-bot-mobile",
+  "label": "HermesBot",
+  "description": "The HermesBot phone app's companion: push notifications and live room activity.",
+  "version": "0.1.0",
+  "tab": { "path": "/hermes-bot-mobile", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

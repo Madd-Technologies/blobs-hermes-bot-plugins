@@ -1,0 +1,6 @@
+name: hermes-paperless
+version: 0.3.0
+description: Lets the HermesBot app show Paperless-ngx documents a bot finds, streamed through this server; nothing is saved here or on the phone.
+author: Madd Technologies
+kind: standalone
+hooks: []
