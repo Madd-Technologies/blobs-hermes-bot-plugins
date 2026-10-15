@@ -167,3 +167,22 @@ class Remembering(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Preview(unittest.TestCase):
+    def test_plain_words_cut_at_a_word(self):
+        self.assertEqual(notify.preview("Short answer."), "Short answer.")
+        text = notify.preview("alpha " * 50, limit=40)
+        self.assertTrue(text.endswith("alpha…"))
+        self.assertLessEqual(len(text), 40)
+
+    def test_markdown_reads_as_words(self):
+        self.assertEqual(notify.preview("**Done.** See `notes.md` and [the PR](https://x/1).\n\n1. one\n2. two"), "Done. See notes.md and the PR. one two")
+        self.assertEqual(notify.preview("```bash\nnpm test\n```\nAll green."), "npm test All green.")
+        self.assertEqual(notify.preview("| a | b |\n|---|:--|\n| 1 | 2 |"), "a b 1 2")
+
+    def test_a_reply_body_is_not_cut_to_the_short_limit(self):
+        body = notify.preview("word " * 40)
+        payload = notify.build("reply", profile="p", bot="Juniper", body=body, key="chat")
+        self.assertEqual(payload["body"], body)
+        self.assertEqual(payload["type"], "Replies")

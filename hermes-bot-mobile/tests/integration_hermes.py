@@ -4,7 +4,8 @@ Not part of the unit tests (it needs a Hermes checkout). Run it with the Hermes 
 
     ~/.hermes/hermes-agent/venv/bin/python hermes-bot-mobile/tests/integration_hermes.py
 
-It points HERMES_HOME at a throwaway folder, so the real `~/.hermes` is never read or written.
+`HERMES_AGENT=<checkout>` picks another Hermes checkout (default `~/.hermes/hermes-agent`). It points HERMES_HOME at a
+throwaway folder, so the real `~/.hermes` is never read or written.
 """
 
 import json
@@ -19,7 +20,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(Path.home() / ".hermes" / "hermes-agent"))
+sys.path.insert(0, os.environ.get("HERMES_AGENT") or str(Path.home() / ".hermes" / "hermes-agent"))
 
 home = Path(tempfile.mkdtemp(prefix="hermes-bot-mobile-it-"))
 os.environ["HERMES_HOME"] = str(home)
@@ -96,6 +97,25 @@ assert "secret-build-dir" not in json.dumps(message)
 arrived.clear()
 invoke_hook("on_session_end", session_id="cron_0a1b2c3d4e5f_20260101_090000", platform="cron", completed=True, failed=False, interrupted=False)
 assert not arrived.wait(2), "a routine that ran was pushed"
+
+# A bot's answer in one of the person's chats (0.1.3): the start of it, like a message.
+assert manager._hooks.get("post_llm_call"), "reply hook not registered"
+chat = "20261015_090000_aa11bb"
+invoke_hook("post_llm_call", session_id=chat, task_id="t", turn_id="turn-1", user_message="Any news on the quote?",
+            assistant_response="**The quote came back** at $640. They can come on Tuesday or Thursday morning.",
+            conversation_history=[], model="m", platform="tui")
+assert arrived.wait(10), "no reply push reached the listener"
+message = json.loads(phone.read(received[-1][2]))
+print("reply push:", message)
+assert message["body"] == "The quote came back at $640. They can come on Tuesday or Thursday morning."
+assert message["type"] == "Replies"
+assert message["url"] == f"hermesbot://bot/default?chat={chat}"
+
+# Another bot's message to this one runs as `hermes -p <bot> chat` ("cli"): not the person's chat, never pushed.
+arrived.clear()
+invoke_hook("post_llm_call", session_id=chat, task_id="t", turn_id="turn-2", user_message="hi", assistant_response="hello",
+            conversation_history=[], model="m", platform="cli")
+assert not arrived.wait(2), "another bot's turn was pushed"
 print("OK")
 
 server.shutdown()

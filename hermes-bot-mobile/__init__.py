@@ -3,8 +3,9 @@
 Standalone plugin, formerly hermes-push (it carries that plugin's registered phones over, see `store.carry_over`):
 
 - Pushes: it listens to the agent's own lifecycle hooks (an approval is waiting, a question was asked, a routine
-  broke) and sends a small encrypted Web Push message to every phone registered through the dashboard API
-  in `dashboard/plugin_api.py`. The phone's UnifiedPush distributor (for example ntfy) delivers it.
+  broke, and for a bot set to `all` a reply in one of the person's chats) and sends a small encrypted Web Push message
+  to every phone registered through the dashboard API in `dashboard/plugin_api.py`. The phone's UnifiedPush distributor
+  (for example ntfy) delivers it.
 - Room activity: it keeps what each bot in a group room is doing right now (running a tool, thinking, writing, waiting
   for your OK) from Hermes's `on_room_member_activity` hook, for the app to show; see `activity.py`.
 
