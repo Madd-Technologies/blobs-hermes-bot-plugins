@@ -1,4 +1,4 @@
-"""Loads the plugin through Hermes's own plugin manager and checks both computer_use fixes on Hermes's real code.
+"""Loads the plugin through Hermes's own plugin manager and checks the computer_use and compaction fixes on Hermes's real code.
 
 Not part of the unit tests (it needs a Hermes checkout). Run it with the Hermes venv, from anywhere:
 
@@ -38,6 +38,10 @@ import tools.computer_use.tool as tool_module  # noqa: E402
 
 assert getattr(capture_module._select_capture_target, "__hermes_bot_fixes__", False), "panel fix not applied"
 assert getattr(tool_module._maybe_follow_capture, "__hermes_bot_fixes__", False), "settle fix not applied"
+import agent.context_compressor as compressor_module  # noqa: E402
+
+assert getattr(compressor_module.ContextCompressor._find_inflight_user_task.__func__, "__hermes_bot_fixes__", False), "compaction fix not applied"
+assert getattr(compressor_module.ContextCompressor._reappend_inflight_user_task, "__hermes_bot_fixes__", False), "compaction fix not applied"
 
 panel = {"app_name": "xfce4-panel", "title": "xfce4-panel", "pid": 11, "window_id": 0x1200003, "off_screen": False, "z_index": 0}
 chrome = {"app_name": "Google-chrome", "title": "Example Domain - Google Chrome", "pid": 22, "window_id": 0x1600004, "off_screen": False, "z_index": 0}
