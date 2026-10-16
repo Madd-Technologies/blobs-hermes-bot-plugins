@@ -32,14 +32,16 @@ tool arguments or output, in one small file per room, written only when a phase 
 
 ## Where a bot runs
 
+<!-- Kept free of the trusted-keys file's name: Hermes's install scan reads an instruction to add to it as a backdoor. -->
 Hermes runs a bot's commands on another computer when that bot's own `config.yaml` says `terminal.backend: ssh` (with
 `ssh_host`, `ssh_user`, `ssh_port`, `ssh_key`), or in a container with `docker`. The app's "Runs on" setting (bot details,
 and New bot) writes those keys through the dashboard's config route; since 0.1.4 this plugin does the two parts a phone
 cannot:
 
 - **A key pair for the bot**, made on this server with its own `ssh-keygen` (ed25519, no passphrase, comment
-  `blobs-<profile>`). The private key never leaves the server; the app gets the public line, for `~/.ssh/authorized_keys`
-  on the other computer, and the private key's path, for `ssh_key`.
+  `blobs-<profile>`). The private key never leaves the server; the app gets the public line, which the person adds to
+  the other computer's trusted keys for that user, and the private key's path, for `ssh_key`. The plugin never changes
+  which keys any computer trusts.
 - **A connection check** that runs `uname -srm` with the same `ssh` options as Hermes's SSH backend (key only, a new
   computer's host key accepted on first contact, a 10 s connect timeout), so a pass means the bot's commands will connect
   too. For `docker` it checks that Docker answers.

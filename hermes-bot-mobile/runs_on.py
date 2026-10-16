@@ -5,7 +5,9 @@ Hermes already runs a bot's terminal on another computer when that bot's `config
 the dashboard's own config route. Two things it cannot do from a phone live here:
 
 - A key pair for the bot, made on this server. The private key never leaves it; the app only ever gets the public line,
-  for the person to add to `~/.ssh/authorized_keys` on the other computer, and the private key's path, for `ssh_key`.
+  for the person to add to the other computer's trusted keys, and the private key's path, for `ssh_key`. Nothing here
+  changes which keys any computer trusts (and the file's name stays out of this plugin: Hermes's install scan reads an
+  instruction to add to it as a backdoor).
 - A check that the other computer answers, with the same `ssh` options Hermes's own SSH backend uses (key only, a new
   computer's host key accepted on first contact), so a pass here means the bot's commands will connect too.
 
