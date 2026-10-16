@@ -119,6 +119,33 @@ class Views(unittest.TestCase):
         self.assertEqual(result["rows"][0]["meta"], {"key": "reply_by", "type": "date", "value": "2026-10-13"})
         self.assertEqual((result["open"], result["needs_you"]), (3, 1))
 
+    def test_row_signals_first_match_wins_and_done_or_muted_rows_carry_none(self):
+        signals = [
+            {"when": {"field": "status", "op": "eq", "value": "Replied"}, "tone": "good"},
+            {"when": {"field": "reply_by", "op": "within_days", "value": 1}, "tone": "bad"},
+            {"when": {"op": "is_open"}, "tone": "warn"},
+        ]
+        records = [*RECORDS, {**rec("e", customer="Kim", status="New", reply_by="2026-10-13"), "muted_until": NOW + DAY}]
+        result = Q.compute_view(self.view("list", {"show": {"title": "customer"}, "include_closed": True, "signals": signals}), FIELDS, records, NOW)
+        tones = {row["id"]: row.get("signal") for row in result["rows"]}
+        self.assertEqual(tones, {"a": "bad", "b": "good", "c": "warn", "d": None, "e": None})
+
+    def test_tables_and_boards_carry_signals_too(self):
+        signals = [{"when": {"field": "channel", "op": "eq", "value": "Walk-in"}, "tone": "good"}]
+        table = Q.compute_view(self.view("table", {"columns": ["customer"], "signals": signals}), FIELDS, RECORDS, NOW)
+        self.assertEqual([row.get("signal") for row in table["rows"]], ["good", None, None])
+        board = Q.compute_view(self.view("board", {"group_by": "status", "show": {"title": "customer"}, "signals": signals}), FIELDS, RECORDS, NOW)
+        self.assertEqual(board["columns"][0]["rows"][0].get("signal"), "good")
+
+    def test_signals_are_checked(self):
+        for bad in ([{"tone": "good"}], [{"when": {"op": "is_open"}, "tone": "red"}], {"when": {"op": "is_open"}}, [{"when": {"field": "nope", "op": "eq", "value": 1}, "tone": "bad"}]):
+            with self.assertRaises(Q.QueryError):
+                Q.clean_view_config("list", {"show": {"title": "customer"}, "signals": bad}, FIELDS)
+        with self.assertRaises(Q.QueryError):
+            Q.clean_view_config("list", {"show": {"title": "customer"}, "signals": [{"when": {"op": "is_open"}, "tone": "good"}] * 9}, FIELDS)
+        self.assertEqual(Q.clean_view_config("list", {"show": {"title": "customer"}}, FIELDS)["signals"], [])
+
+
     def test_a_board_groups_by_stage_and_keeps_recently_closed(self):
         result = Q.compute_view(self.view("board", {"group_by": "status", "show": {"title": "customer"}}), FIELDS, RECORDS, NOW)
         self.assertEqual([(column["name"], column["count"]) for column in result["columns"]], [("New", 1), ("Replied", 1), ("Waiting", 1), ("Done", 1)])

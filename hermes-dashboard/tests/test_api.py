@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -28,6 +29,12 @@ class Api(unittest.TestCase):
         S, T = self.module._package()
         self.S = S
         T._shared.clear()
+        # The routes mirror the kanban board first: never this machine's real board, a stand-in with no cards.
+        self.kanban = self.module._kanban()
+        self.kanban._last[0] = 0.0
+        board = mock.patch.object(self.kanban, "HermesBoard", lambda: types.SimpleNamespace(boards=lambda: [], open_cards=lambda board: [], card=lambda board, task: None))
+        board.start()
+        self.addCleanup(board.stop)
         patch = mock.patch.object(S, "default_dir", lambda: Path(self.dir.name))
         patch.start()
         self.addCleanup(patch.stop)
@@ -48,8 +55,33 @@ class Api(unittest.TestCase):
             del sys.modules[key]
 
     def test_status_and_summary(self):
-        self.assertEqual(self.client.get(f"{self.base}/status").json()["version"], "0.3.1")
+        manifest = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
+        self.assertIn(f"version: {self.client.get(f'{self.base}/status').json()['version']}\n", manifest)
         self.assertEqual(self.client.get(f"{self.base}/bots").json()["bots"]["concierge"]["needs_you"], 1)
+
+    def test_a_blocked_kanban_card_needs_you_and_a_note_answers_it(self):
+        card = {"board": "default", "id": "t_1", "title": "Write the weekly report", "assignee": "concierge", "status": "blocked", "reason": "Which week?", "latest": None, "updated": 1}
+        answered = []
+
+        def answer(board, task, text):
+            answered.append((task, text))
+            card.update(status="ready", reason=None)
+
+            return "ready"
+
+        fake = types.SimpleNamespace(boards=lambda: ["default"], open_cards=lambda board: [dict(card)], card=lambda board, task: dict(card), answer=answer)
+
+        with mock.patch.object(self.kanban, "HermesBoard", lambda: fake), mock.patch.object(self.S.L, "plugin_installed", lambda root, profile: True):
+            self.assertEqual(self.client.get(f"{self.base}/bots").json()["bots"]["concierge"]["needs_you"], 2)
+            records = self.client.get(f"{self.base}/bots/concierge/needs-you").json()["records"]
+            row = next(item["row"] for item in records if item["view"] == "background-work")
+            body = self.client.post(f"{self.base}/records/{row['id']}/notes", json={"text": "Last week."}).json()
+            self.assertEqual(body["card"], {"card": "t_1", "posted": True, "status": "ready"})
+            self.assertEqual(answered, [("t_1", "Last week.")])
+            self.assertEqual(self.client.get(f"{self.base}/bots").json()["bots"]["concierge"]["needs_you"], 1)
+
+        # A note on any other record is only a note.
+        self.assertNotIn("card", self.client.post(f"{self.base}/records/{self.record['id']}/notes", json={"text": "hi"}).json())
 
     def test_a_dashboard_computed(self):
         body = self.client.get(f"{self.base}/bots/concierge").json()

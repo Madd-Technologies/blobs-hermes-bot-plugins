@@ -1,6 +1,9 @@
 """The phone's side of hermes-dashboard: each bot's dashboard computed, a record with its history, and the person's actions
 on a record (change fields, add a note, close or reopen). The person never creates records or views; bots do.
 
+Reading dashboards first mirrors the kanban board into each bot's Background work (`kanban.py`, at most every 15 s), and a
+note on a card's record is posted on the card as the person's answer.
+
 Mounted by Hermes under `/api/plugins/hermes-dashboard/`, behind the dashboard's own sign-in. Hermes imports this file on
 its own, apart from the plugin package, so it loads the package by path and shares the database with the bots' tools.
 """
@@ -32,10 +35,24 @@ def _package():
     return importlib.import_module(f"{_PACKAGE}.store"), importlib.import_module(f"{_PACKAGE}.tools")
 
 
+def _kanban():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.kanban")
+
+
 def _store():
     S, T = _package()
 
     return S, T.open_store()
+
+
+def _mirror() -> None:
+    """Brings each bot's Background work up to date with the kanban board (throttled; never raises)."""
+    try:
+        _kanban().sync(_store()[1])
+    except Exception:  # pragma: no cover - the dashboard must answer anyway
+        pass
 
 
 def _version() -> str:
@@ -69,6 +86,8 @@ async def status() -> dict:
 
 @router.get("/bots")
 async def bots() -> dict:
+    _mirror()
+
     return _guard(lambda S, store: {"bots": store.summary(), "now": int(time.time())})
 
 
@@ -77,6 +96,8 @@ async def bot(profile: str, since: str | None = None, fresh: bool = False) -> di
     """A bot's dashboard. With `since` (the version it last answered) and nothing changed: `{unchanged, version}`, and
     no view is computed. `fresh` reads live sources now instead of from their short cache (the app's pull to refresh).
     `installed` says whether that bot has the plugin (None when it can't be told)."""
+
+    _mirror()
 
     def answer(S, store):
         if since and not fresh:
@@ -96,6 +117,8 @@ async def bot(profile: str, since: str | None = None, fresh: bool = False) -> di
 
 @router.get("/bots/{profile}/needs-you")
 async def bot_needs_you(profile: str) -> dict:
+    _mirror()
+
     return _guard(lambda S, store: {"profile": profile, "records": store.needs_you_records(profile), "now": int(time.time())})
 
 
@@ -119,7 +142,15 @@ class Note(BaseModel):
 
 @router.post("/records/{record_id}/notes")
 async def note(record_id: str, body: Note) -> dict:
-    return _guard(lambda S, store: store.add_note(S.Actor.person(), record_id, body.text))
+    """A note on a record. On a kanban card's record it is also the person's answer, posted on the card (`card`)."""
+
+    def add(S, store):
+        result = store.add_note(S.Actor.person(), record_id, body.text)
+        card = _kanban().answer(store, record_id, result["note"])
+
+        return {**result, "card": card} if card else result
+
+    return _guard(add)
 
 
 class Mute(BaseModel):

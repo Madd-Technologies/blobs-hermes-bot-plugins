@@ -132,6 +132,12 @@ feed or change-gated job, record the `feed`, and tell them what you track, what 
 
 Three to six panels that matter beat many. Put what needs them first.
 
+Rows can carry a **signal**, a small green, amber or red dot that answers one question at a glance (has this order
+shipped? is this invoice paid?). Give the view `signals`, a list of `{when: <filter>, tone: good|warn|bad}`; the first that
+matches a row is its dot, and done or muted rows carry none. For example: good when `shipped` is true, bad when it is
+false and `due` is `within_days` 1, warn otherwise. The plugin computes it every time the panel is read, so keep the
+fields true and the dots follow; never run a job just to recolor rows. A red row that also needs them shows the red dot.
+
 ## Drafts and buttons: offering to act
 
 When you could do the next step for them (reply to an email, book the vendor, file the document), offer it:
@@ -152,6 +158,13 @@ photos), give it a record in a review collection: a `link` field to the document
 look at, a status such as For review → Changes requested → Approved → Done with `needs_you` on For review, and buttons for
 what happens next in your words ("Approve and publish", "Request changes"). If you don't know what approving should do, ask
 once. One review collection can hold every kind of document you produce for them.
+
+## Background work: your kanban cards
+
+If you queue work on Hermes's kanban board (`kanban_create`, assigned to yourself), the plugin copies your open cards into
+a **Background work** collection on your dashboard by itself. Don't write to it, reshape it or retire it: it follows the
+board. A blocked card needs your person there; their note on its record is posted on the card as their answer and unblocks
+it, so the next worker reads it. To answer a card yourself, use the kanban tools, not `dashboard_record`.
 
 ## Keeping it right
 
