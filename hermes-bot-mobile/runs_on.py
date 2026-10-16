@@ -11,7 +11,9 @@ the dashboard's own config route. Two things it cannot do from a phone live here
 - A check that the other computer answers, with the same `ssh` options Hermes's own SSH backend uses (key only, a new
   computer's host key accepted on first contact), so a pass here means the bot's commands will connect too.
 
-Keys live under the Hermes root, one folder per bot: `hermes-bot-mobile/ssh/<profile>/id_ed25519` (0600, folders 0700).
+Each bot's key lives in its own home, `<profile home>/.ssh/runs_on_ed25519` (0600, folder 0700). Hermes treats a
+profile's `.ssh` as a credential store: profile exports leave it out and the SSH backend's sync never copies it to the
+other computer. Deleting the bot deletes its key, so a new bot with the same name gets a key of its own.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import Callable
 
 #: A Hermes profile name (`profiles.create` enforces the same).
 PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -78,13 +81,16 @@ def check_target(host: str, user: str, port: int) -> tuple[str, str, int]:
 
 
 class Keys:
-    """One SSH key pair per bot, made with the server's own `ssh-keygen`."""
+    """One SSH key pair per bot, made with the server's own `ssh-keygen` in that bot's home."""
 
-    def __init__(self, folder: Path):
-        self.folder = folder
+    NAME = "runs_on_ed25519"
+
+    def __init__(self, home_of: Callable[[str], Path]):
+        #: A profile's home folder (the Hermes root for `default`, `profiles/<name>` under it for the others).
+        self.home_of = home_of
 
     def path(self, profile: str) -> Path:
-        return self.folder / check_profile(profile) / "id_ed25519"
+        return self.home_of(check_profile(profile)) / ".ssh" / self.NAME
 
     def public(self, profile: str) -> str | None:
         """The bot's public line (`ssh-ed25519 AAAA… blobs-<profile>`), or None before one is made."""
@@ -107,8 +113,8 @@ class Keys:
             if not keygen:
                 raise FileNotFoundError("ssh-keygen is not installed on the server.")
 
-            path.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(self.folder, 0o700)
+            # Only `.ssh` is made: the bot's home already exists, and a missing one means the bot is gone.
+            path.parent.mkdir(mode=0o700, exist_ok=True)
             os.chmod(path.parent, 0o700)
             # Made under a temporary name and moved into place, so a half-made key is never read as the bot's.
             temp = path.parent / f".new-{secrets.token_hex(4)}"

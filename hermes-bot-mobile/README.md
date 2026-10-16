@@ -40,7 +40,9 @@ cannot:
 
 - **A key pair for the bot**, made on this server with its own `ssh-keygen` (ed25519, no passphrase, comment
   `blobs-<profile>`). The private key never leaves the server; the app gets the public line, which the person adds to
-  the other computer's trusted keys for that user, and the private key's path, for `ssh_key`. The plugin never changes
+  the other computer's trusted keys for that user, and the private key's path, for `ssh_key`. The key is kept in the
+  bot's own home, `<profile home>/.ssh/runs_on_ed25519` (0600, folder 0700): Hermes leaves a profile's `.ssh` out of
+  exports and never copies it to the other computer, and deleting the bot deletes its key. The plugin never changes
   which keys any computer trusts.
 - **A connection check** that runs `uname -srm` with the same `ssh` options as Hermes's SSH backend (key only, a new
   computer's host key accepted on first contact, a 10 s connect timeout), so a pass means the bot's commands will connect
@@ -67,9 +69,9 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 ## Data
 
 `~/.hermes/hermes-bot-mobile/` (the Hermes root, not a profile: one phone, many bots): `devices.json`, `settings.json`,
-`vapid.json`, `presence.json` (all 0600), `rooms/<room_id>.json` and `ssh/<profile>/id_ed25519` (0600, folders 0700). On
-first start it copies `~/.hermes/hermes-push/` there if this folder has none of its own files yet, so phones registered
-with `hermes-push` keep getting pushes.
+`vapid.json`, `presence.json` (all 0600) and `rooms/<room_id>.json`. On first start it copies `~/.hermes/hermes-push/`
+there if this folder has none of its own files yet, so phones registered with `hermes-push` keep getting pushes. A bot's
+SSH key is in that bot's own home (see Where a bot runs).
 
 ## Tests
 

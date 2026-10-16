@@ -55,17 +55,22 @@ def _runs_on():
     return importlib.import_module(f"{_PACKAGE}.runs_on")
 
 
-def _profile_exists(profile: str) -> bool:
-    """A bot this server has: `default`, or a folder under the root's `profiles/`."""
+def _profile_home(profile: str) -> Path:
+    """A bot's own folder: the Hermes root for `default`, `profiles/<name>` under it for the others."""
     from hermes_constants import get_default_hermes_root
 
-    return profile == "default" or (get_default_hermes_root() / "profiles" / profile).is_dir()
+    root = get_default_hermes_root()
+
+    return root if profile == "default" else root / "profiles" / profile
+
+
+def _profile_exists(profile: str) -> bool:
+    """A bot this server has: `default`, or a folder under the root's `profiles/`."""
+    return profile == "default" or _profile_home(profile).is_dir()
 
 
 def _keys():
-    store_module, _ = _modules()
-
-    return _runs_on().Keys(store_module.default_dir() / "ssh")
+    return _runs_on().Keys(_profile_home)
 
 
 def _known_bot(profile: str) -> str:

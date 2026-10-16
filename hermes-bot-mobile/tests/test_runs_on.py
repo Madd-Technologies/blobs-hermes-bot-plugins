@@ -129,12 +129,17 @@ class Check(unittest.TestCase):
 class KeyPairs(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
-        self.keys = runs_on.Keys(Path(self.dir.name) / "ssh")
+        self.profiles = Path(self.dir.name) / "profiles"
+
+        for name in ["zz-scout", "zz-other"]:
+            (self.profiles / name).mkdir(parents=True, mode=0o755)
+
+        self.keys = runs_on.Keys(lambda profile: self.profiles / profile)
 
     def tearDown(self):
         self.dir.cleanup()
 
-    def test_makes_one_private_key_per_bot_and_hands_out_only_the_public_line(self):
+    def test_makes_one_private_key_per_bot_in_its_home_and_hands_out_only_the_public_line(self):
         self.assertIsNone(self.keys.public("zz-scout"))
         made = self.keys.make("zz-scout")
 
@@ -143,11 +148,12 @@ class KeyPairs(unittest.TestCase):
         self.assertTrue(made["public"].endswith(" blobs-zz-scout"))
         self.assertNotIn("PRIVATE", made["public"])
         private = Path(made["path"])
-        self.assertEqual(private, Path(self.dir.name) / "ssh" / "zz-scout" / "id_ed25519")
+        self.assertEqual(private, self.profiles / "zz-scout" / ".ssh" / "runs_on_ed25519")
         self.assertEqual(stat.S_IMODE(os.stat(private).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(private.parent).st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(os.stat(private.parent.parent).st_mode), 0o700)
-        self.assertEqual(sorted(p.name for p in private.parent.iterdir()), ["id_ed25519", "id_ed25519.pub"])
+        # The bot's home keeps its own mode.
+        self.assertEqual(stat.S_IMODE(os.stat(private.parent.parent).st_mode), 0o755)
+        self.assertEqual(sorted(p.name for p in private.parent.iterdir()), ["runs_on_ed25519", "runs_on_ed25519.pub"])
 
     def test_making_again_keeps_the_same_key(self):
         first = self.keys.make("zz-scout")
@@ -156,6 +162,19 @@ class KeyPairs(unittest.TestCase):
         self.assertFalse(second["created"])
         self.assertEqual(first["public"], second["public"])
         self.assertNotEqual(self.keys.make("zz-other")["public"], first["public"])
+
+    def test_a_deleted_bot_takes_its_key_along_and_a_new_one_with_its_name_gets_its_own(self):
+        first = self.keys.make("zz-scout")
+        shutil.rmtree(self.profiles / "zz-scout")
+        self.assertIsNone(self.keys.public("zz-scout"))
+
+        with self.assertRaises(FileNotFoundError):
+            self.keys.make("zz-scout")
+
+        (self.profiles / "zz-scout").mkdir()
+        again = self.keys.make("zz-scout")
+        self.assertTrue(again["created"])
+        self.assertNotEqual(again["public"], first["public"])
 
 
 class Routes(unittest.TestCase):
@@ -167,6 +186,10 @@ class Routes(unittest.TestCase):
         bots = mock.patch.object(self.module, "_profile_exists", lambda name: name in {"default", "zz-scout"})
         bots.start()
         self.addCleanup(bots.stop)
+        (Path(self.dir.name) / "zz-scout").mkdir()
+        homes = mock.patch.object(self.module, "_profile_home", lambda name: Path(self.dir.name) / name)
+        homes.start()
+        self.addCleanup(homes.stop)
         app = FastAPI()
         app.include_router(self.module.router, prefix="/api/plugins/hermes-bot-mobile")
         self.client = TestClient(app)
