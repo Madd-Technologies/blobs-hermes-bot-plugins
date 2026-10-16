@@ -31,7 +31,7 @@ except ImportError:  # the tests and the writer import the modules flat
     import query as Q  # type: ignore[no-redef]
     import sources as L  # type: ignore[no-redef]
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MAX_COLLECTIONS = 50
 MAX_OPEN_RECORDS = 5000
 MAX_VIEWS = 30
@@ -79,12 +79,18 @@ CREATE TABLE IF NOT EXISTS views (
   key TEXT PRIMARY KEY, dashboard TEXT NOT NULL, id TEXT NOT NULL, collection TEXT, title TEXT NOT NULL, kind TEXT NOT NULL,
   config TEXT NOT NULL, position INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS kanban_cards (
+  board TEXT NOT NULL, task TEXT NOT NULL, profile TEXT NOT NULL, record TEXT NOT NULL, status TEXT NOT NULL, seen TEXT NOT NULL,
+  PRIMARY KEY (board, task)
+);
+CREATE INDEX IF NOT EXISTS kanban_cards_record ON kanban_cards (record);
 """
 
 
 def _migrate(conn) -> None:
     """Schema 2 adds a collection's buttons (`actions`) and the button job a record waits on (`running`); schema 3 the time
-    a record the person muted speaks up again (`muted_until`); schema 4 how a collection is kept fresh (`feed`)."""
+    a record the person muted speaks up again (`muted_until`); schema 4 how a collection is kept fresh (`feed`); schema 5
+    the kanban cards mirrored into records (`kanban_cards`, a new table the schema script creates)."""
     for table, column, kind in (("collections", "actions", "TEXT NOT NULL DEFAULT '[]'"), ("records", "running", "TEXT"), ("records", "muted_until", "INTEGER"), ("collections", "feed", "TEXT")):
         if column not in {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
@@ -1034,6 +1040,28 @@ class Store:
     def list_views(self, dashboard: str) -> list[dict]:
         with self._db() as conn:
             return [self._view(row) for row in conn.execute("SELECT * FROM views WHERE dashboard = ? ORDER BY position, title", (dashboard,))]
+
+    # -- kanban cards mirrored into records (kanban.py) -----------------------------------------------------------
+
+    def mirrored_cards(self) -> dict:
+        """`(board, task)` → `{profile, record, status, seen}` for every kanban card mirrored so far."""
+        with self._db() as conn:
+            return {(row["board"], row["task"]): {"profile": row["profile"], "record": row["record"], "status": row["status"], "seen": row["seen"]} for row in conn.execute("SELECT * FROM kanban_cards")}
+
+    def remember_card(self, board: str, task: str, profile: str, record: str, status: str, seen: str) -> None:
+        with self._db(write=True) as conn:
+            conn.execute(
+                "INSERT INTO kanban_cards (board, task, profile, record, status, seen) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (board, task) DO UPDATE SET profile = excluded.profile, record = excluded.record, status = excluded.status, seen = excluded.seen",
+                (board, task, profile, record, status, seen),
+            )
+
+    def card_of(self, record_id: str) -> dict | None:
+        """The kanban card a record mirrors, or None."""
+        with self._db() as conn:
+            row = conn.execute("SELECT * FROM kanban_cards WHERE record = ?", (str(record_id or ""),)).fetchone()
+
+            return {"board": row["board"], "task": row["task"], "profile": row["profile"], "status": row["status"]} if row else None
 
     # -- what the app shows -----------------------------------------------------------------------------------
 

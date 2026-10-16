@@ -467,6 +467,7 @@ def clean_view_config(kind: str, raw, fields: list[dict] | None) -> dict:
     config: dict = {}
     config["filter"] = clean_filter(raw.get("filter"), fields)
     config["needs_you"] = clean_filter(raw.get("needs_you"), fields)
+    config["signals"] = clean_signals(raw.get("signals"), fields)
 
     if kind in ("list", "checklist", "board", "table"):
         config["sort"] = clean_sort(raw.get("sort"), fields)
@@ -550,6 +551,11 @@ def _row(record: dict, config: dict, fields: list[dict], now: float) -> dict:
     if muted(record, now):
         row["muted_until"] = record["muted_until"]
 
+    tone = signal(record, config, fields, now)
+
+    if tone:
+        row["signal"] = tone
+
     for slot in ("title", "subtitle", "meta", "link"):
         typed = _typed(by_key, show.get(slot), record)
 
@@ -575,6 +581,50 @@ def muted(record: dict, now: float) -> bool:
     until = record.get("muted_until")
 
     return bool(until) and float(until) > now
+
+
+#: A row signal's tones: the app draws a small dot, green, amber or red.
+TONES = ("good", "warn", "bad")
+MAX_SIGNALS = 8
+
+
+def clean_signals(raw, fields: list[dict]) -> list[dict]:
+    """A view's row signals, `[{when: <filter>, tone: good|warn|bad}]`; the first that matches a row is its signal."""
+    if raw in (None, [], ""):
+        return []
+
+    if not isinstance(raw, list):
+        raise QueryError("signals is a list: [{when: <filter>, tone: good|warn|bad}], first match wins")
+
+    if len(raw) > MAX_SIGNALS:
+        raise QueryError(f"a view has at most {MAX_SIGNALS} signals")
+
+    cleaned = []
+
+    for rule in raw:
+        if not isinstance(rule, dict) or rule.get("tone") not in TONES:
+            raise QueryError("each signal needs a tone: good, warn or bad")
+
+        when = clean_filter(rule.get("when"), fields)
+
+        if not when:
+            raise QueryError("each signal needs a when filter")
+
+        cleaned.append({"when": when, "tone": rule["tone"]})
+
+    return cleaned
+
+
+def signal(record: dict, config: dict, fields: list[dict], now: float) -> str | None:
+    """The row's signal: the first matching rule's tone. Done and muted records carry none."""
+    if record.get("closed_at") or muted(record, now):
+        return None
+
+    for rule in config.get("signals") or []:
+        if matches(rule["when"], record, fields, now):
+            return rule["tone"]
+
+    return None
 
 
 def needs_you(record: dict, config: dict, fields: list[dict], now: float) -> bool:
@@ -618,7 +668,7 @@ def compute_view(view: dict, fields: list[dict] | None, records: list[dict], now
             by_key = {field["key"]: field for field in fields}
             columns = config.get("columns", [])
             result["columns"] = [{"key": key, "label": by_key[key]["label"] if key in by_key else key.strip("_").capitalize(), "type": "datetime" if key in SPECIAL else by_key[key]["type"]} for key in columns]
-            result["rows"] = [{"id": record["id"], "done": bool(record.get("closed_at")), "needs_you": needs_you(record, config, fields, now), **({"muted_until": record["muted_until"]} if muted(record, now) else {}), "cells": [_typed(by_key, key, record) for key in columns]} for record in shown]
+            result["rows"] = [{"id": record["id"], "done": bool(record.get("closed_at")), "needs_you": needs_you(record, config, fields, now), **({"muted_until": record["muted_until"]} if muted(record, now) else {}), **({"signal": tone} if (tone := signal(record, config, fields, now)) else {}), "cells": [_typed(by_key, key, record) for key in columns]} for record in shown]
         else:
             result["rows"] = [_row(record, config, fields, now) for record in shown]
 
