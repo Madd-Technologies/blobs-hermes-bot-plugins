@@ -91,6 +91,7 @@ class Check(unittest.TestCase):
     def test_says_why_it_failed(self):
         cases = {
             "scout@vps: Permission denied (publickey).": "auth",
+            "Received disconnect from 10.0.0.2 port 22:2: Too many authentication failures": "too_many_keys",
             "Host key verification failed.": "host_key",
             "ssh: Could not resolve hostname vps: nodename nor servname provided, or not known": "unknown_host",
             "ssh: connect to host vps port 22: Connection refused": "refused",

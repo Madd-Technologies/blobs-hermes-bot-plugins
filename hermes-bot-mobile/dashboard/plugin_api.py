@@ -252,7 +252,8 @@ def make_runs_on_key(body: KeyIn) -> dict:
 @router.post("/runs-on/check")
 def check_runs_on(body: CheckIn) -> dict:
     """Connects the way the bot will: `{ok: true, system}` or `{ok: false, reason, detail}`. `reason` is one of auth,
-    host_key, unknown_host, refused, timeout, unreachable, key_missing, no_ssh, no_docker, docker_down or other."""
+    too_many_keys, host_key, unknown_host, refused, timeout, unreachable, key_missing, no_ssh, no_docker, docker_down
+    or other."""
     runs_on = _runs_on()
     _known_bot(body.profile)
 

@@ -36,7 +36,10 @@ CHECK_TIMEOUT = 25.0
 
 #: ssh's own words, mapped to a reason the app can explain. First match wins.
 REASONS = [
-    ("auth", ("permission denied", "too many authentication failures", "no supported authentication methods")),
+    # ssh offers every key it has (an agent's first) and the other computer stops after a few (MaxAuthTries, often 6), so
+    # with many keys the bot's own one is never tried. Hermes connects the same way, so its commands would fail too.
+    ("too_many_keys", ("too many authentication failures",)),
+    ("auth", ("permission denied", "no supported authentication methods")),
     ("host_key", ("host key verification failed", "remote host identification has changed")),
     ("unknown_host", ("could not resolve hostname", "name or service not known", "nodename nor servname")),
     ("refused", ("connection refused",)),
