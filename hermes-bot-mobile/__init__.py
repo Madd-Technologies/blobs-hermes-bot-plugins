@@ -3,7 +3,8 @@
 Standalone plugin, formerly hermes-push (it carries that plugin's registered phones over, see `store.carry_over`):
 
 - Pushes: it listens to the agent's own lifecycle hooks (an approval is waiting, a question was asked, a routine
-  broke, and for a bot set to `all` a reply in one of the person's chats) and sends a small encrypted Web Push message
+  broke, a background worker blocked its kanban card on the person, and for a bot set to `all` a reply in one of the
+  person's chats) and sends a small encrypted Web Push message
   to every phone registered through the dashboard API in `dashboard/plugin_api.py`. The phone's UnifiedPush distributor
   (for example ntfy) delivers it.
 - Room activity: it keeps what each bot in a group room is doing right now (running a tool, thinking, writing, waiting
@@ -24,11 +25,15 @@ def register(ctx) -> None:
     from .hooks import PushHooks
 
     hooks = PushHooks()
+    watched = []
 
     for name, callback in hooks.callbacks().items():
-        ctx.register_hook(name, callback)
-
-    watched = list(hooks.callbacks())
+        # One hook this Hermes doesn't have (kanban_task_blocked needs 0.21.5+) must not cost the others.
+        try:
+            ctx.register_hook(name, callback)
+            watched.append(name)
+        except Exception as error:
+            log.info("hermes-bot-mobile: no %s hook on this Hermes (%s)", name, error)
 
     # Live room activity needs Hermes 0.21.5+ (the hook); older ones keep the pushes and the room shows "working".
     try:

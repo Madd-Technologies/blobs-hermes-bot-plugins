@@ -27,6 +27,8 @@ class Setup(unittest.TestCase):
         # Chat titles and routine names Hermes would answer with (see hooks.chat_title, hooks.routine_name).
         self.titles: dict[str, str] = {}
         self.routines: dict[str, str] = {}
+        # Kanban cards as Hermes's board would answer (see hooks.kanban_card).
+        self.cards: dict[str, dict] = {}
         self.hooks = hooks.PushHooks(
             store=self.store,
             pusher=notify.Pusher(self.store, post=self.net, background=False),
@@ -35,6 +37,7 @@ class Setup(unittest.TestCase):
             context=lambda: dict(self.context),
             title=lambda chat: self.titles.get(chat, ""),
             routine=lambda session: self.routines.get(session, ""),
+            card=lambda board, task: self.cards.get(task),
         )
 
     def tearDown(self):
@@ -42,6 +45,50 @@ class Setup(unittest.TestCase):
 
     def sent(self):
         return [json.loads(self.phone.read(body)) for _, _, body in self.net.calls]
+
+
+class BlockedCards(Setup):
+    def block(self, task="t_1", run=7, **card):
+        self.cards[task] = {"title": "Write the weekly report", "status": "blocked", "loop": False, "reason": "Which week?", **card}
+        self.hooks.on_kanban_blocked(task_id=task, board="default", assignee="concierge", profile_name="concierge", run_id=run, reason="Which week?")
+
+    def test_a_card_blocked_on_the_person_reaches_the_phone(self):
+        self.block()
+        (message,) = self.sent()
+        self.assertEqual(message["title"], "Juniper")
+        self.assertEqual(message["body"], "Needs you: Write the weekly report — Which week?")
+        self.assertEqual(message["type"], "Questions")
+        self.assertEqual(message["url"], notify.INBOX)
+
+    def test_it_is_about_the_card_s_own_bot(self):
+        self.store.set_settings(None, {"concierge": "off"})
+        self.block()
+        self.assertEqual(self.sent(), [])
+
+    def test_a_card_waiting_on_another_card_is_not_for_the_phone(self):
+        self.block(status="todo")
+        self.assertEqual(self.sent(), [])
+
+    def test_a_card_blocked_again_goes_to_triage_and_still_needs_the_person(self):
+        self.block(status="triage", loop=True)
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_a_card_waiting_for_a_planner_is_not_for_the_phone(self):
+        self.block(status="triage", loop=False)
+        self.assertEqual(self.sent(), [])
+
+    def test_one_push_per_block(self):
+        self.block()
+        self.block()
+        self.block(run=8)
+        self.assertEqual(len(self.sent()), 2)
+
+    def test_a_card_the_board_cannot_read_is_not_pushed(self):
+        self.hooks.on_kanban_blocked(task_id="t_gone", board="default", assignee="concierge", run_id=1)
+        self.assertEqual(self.sent(), [])
+
+    def test_the_hook_is_registered(self):
+        self.assertIn("kanban_task_blocked", self.hooks.callbacks())
 
 
 class Approvals(Setup):
@@ -426,22 +473,28 @@ class LoadedLikeHermes(unittest.TestCase):
 
         try:
             spec.loader.exec_module(module)
-            registered = {}
+            def load(known=None):
+                registered = {}
 
-            class Context:
-                def register_hook(self, hook, callback):
-                    registered[hook] = callback
+                class Context:
+                    def register_hook(self, hook, callback):
+                        if known is not None and hook not in known:
+                            raise ValueError(f"unknown hook {hook}")
 
-            with tempfile.TemporaryDirectory() as folder:
-                store_module = importlib.import_module(f"{name}.store")
+                        registered[hook] = callback
 
-                with mock.patch.object(store_module, "default_dir", lambda: Path(folder)):
-                    module.register(Context())
+                with tempfile.TemporaryDirectory() as folder:
+                    store_module = importlib.import_module(f"{name}.store")
 
-            self.assertEqual(
-                set(registered),
-                {"pre_approval_request", "pre_tool_call", "post_llm_call", "on_session_end", "on_room_member_activity"},
-            )
+                    with mock.patch.object(store_module, "default_dir", lambda: Path(folder)):
+                        module.register(Context())
+
+                return set(registered)
+
+            every = {"pre_approval_request", "pre_tool_call", "post_llm_call", "on_session_end", "on_room_member_activity", "kanban_task_blocked"}
+            self.assertEqual(load(), every)
+            # A Hermes without the kanban hook keeps every other one.
+            self.assertEqual(load(every - {"kanban_task_blocked"}), every - {"kanban_task_blocked"})
         finally:
             for key in [k for k in sys.modules if k == name or k.startswith(name + ".")]:
                 del sys.modules[key]

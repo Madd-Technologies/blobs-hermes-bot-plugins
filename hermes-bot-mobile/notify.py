@@ -2,7 +2,7 @@
 
 A notification carries as little as possible: the bot and the chat or routine it is about, what it wants in a few words,
 and where tapping it should land. **Never the command.** What needs the person is pushed (an approval, a question, a
-routine that broke), and, for a bot set to `all`, the start of a reply it gave in one of the person's chats, the way a
+routine that broke, a kanban card a background worker blocked on them), and, for a bot set to `all`, the start of a reply it gave in one of the person's chats, the way a
 messaging app shows a message ("Juniper: The quote came back at…"); never that a turn finished or a routine ran. A reply
 goes under its own channel ("Replies"), so the phone's lock-screen settings can hide its words. The app fetches the real
 thing (with its Allow / Deny buttons) once the person opens it.
@@ -30,11 +30,11 @@ except ImportError:  # the tests import the modules flat
 log = logging.getLogger("hermes-bot-mobile")
 
 #: The notification channel the phone files each kind under (its name is what the person sees in Android settings).
-CHANNELS = {"approval": "Approvals", "question": "Questions", "routine": "Routines", "reply": "Replies", "test": "Results"}
+CHANNELS = {"approval": "Approvals", "question": "Questions", "blocked": "Questions", "routine": "Routines", "reply": "Replies", "test": "Results"}
 
 #: Seconds a push may wait in the push service if the phone is off, and how it is flagged for delivery.
-TTL_SECONDS = {"approval": 300, "question": 3600, "routine": 3600, "reply": 3600, "test": 60}
-URGENCY = {"approval": "high", "question": "high", "routine": "normal", "reply": "normal", "test": "high"}
+TTL_SECONDS = {"approval": 300, "question": 3600, "blocked": 3600, "routine": 3600, "reply": 3600, "test": 60}
+URGENCY = {"approval": "high", "question": "high", "blocked": "high", "routine": "normal", "reply": "normal", "test": "high"}
 
 BODY_LIMIT = 80
 #: A reply's preview: about two lines on the shade, the rest when it is expanded (the phone shows it as big text).
@@ -156,6 +156,9 @@ def lines(kind: str, *, detail: str = "", failed: bool = False) -> str:
 
     if kind == "question":
         return f"Asks: {detail}" if detail else "Has a question for you"
+
+    if kind == "blocked":
+        return f"Needs you: {detail}" if detail else "A background task needs you"
 
     if kind == "reply":
         return detail
