@@ -1,6 +1,6 @@
 name: hermes-bot-mobile
-version: 0.1.3
-description: The HermesBot phone app's companion on this server - push notifications when a bot needs you or answers you, and live activity of bots in group rooms.
+version: 0.1.4
+description: The HermesBot phone app's companion on this server - push notifications when a bot needs you or answers you, live activity of bots in group rooms, and setting up a bot to run its commands on another computer.
 author: Madd Technologies
 kind: standalone
 provides_hooks:

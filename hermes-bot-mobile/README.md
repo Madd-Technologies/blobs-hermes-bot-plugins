@@ -30,6 +30,22 @@ the `on_room_member_activity` hook (Hermes 0.21.5+) this keeps what each bot is 
 name), thinking, writing, or waiting for your OK. Only the phase, the tool's name and when it began are kept, never text,
 tool arguments or output, in one small file per room, written only when a phase changes.
 
+## Where a bot runs
+
+Hermes runs a bot's commands on another computer when that bot's own `config.yaml` says `terminal.backend: ssh` (with
+`ssh_host`, `ssh_user`, `ssh_port`, `ssh_key`), or in a container with `docker`. The app's "Runs on" setting (bot details,
+and New bot) writes those keys through the dashboard's config route; since 0.1.4 this plugin does the two parts a phone
+cannot:
+
+- **A key pair for the bot**, made on this server with its own `ssh-keygen` (ed25519, no passphrase, comment
+  `blobs-<profile>`). The private key never leaves the server; the app gets the public line, for `~/.ssh/authorized_keys`
+  on the other computer, and the private key's path, for `ssh_key`.
+- **A connection check** that runs `uname -srm` with the same `ssh` options as Hermes's SSH backend (key only, a new
+  computer's host key accepted on first contact, a 10 s connect timeout), so a pass means the bot's commands will connect
+  too. For `docker` it checks that Docker answers.
+
+On SSH, Hermes copies the bot's skills and credential files to `~/.hermes` on that computer.
+
 ## Routes
 
 Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
@@ -42,12 +58,16 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `PUT /presence` | what the phone has on screen (no pushes for it) |
 | `POST /test` | send a test push |
 | `GET /rooms/{room_id}/activity` | `{members: {member_id: {phase, tool, since}}, now}` |
+| `GET /runs-on/key?profile=` | the bot's public SSH line (`null` before one is made) and its private key's path |
+| `POST /runs-on/key` | `{profile}`: makes the bot's key pair if it has none |
+| `POST /runs-on/check` | `{profile, backend: ssh\|docker, host, user, port, key}`: `{ok, system}` or `{ok: false, reason, detail}` |
 
 ## Data
 
 `~/.hermes/hermes-bot-mobile/` (the Hermes root, not a profile: one phone, many bots): `devices.json`, `settings.json`,
-`vapid.json`, `presence.json` (all 0600) and `rooms/<room_id>.json`. On first start it copies `~/.hermes/hermes-push/`
-there if this folder has none of its own files yet, so phones registered with `hermes-push` keep getting pushes.
+`vapid.json`, `presence.json` (all 0600), `rooms/<room_id>.json` and `ssh/<profile>/id_ed25519` (0600, folders 0700). On
+first start it copies `~/.hermes/hermes-push/` there if this folder has none of its own files yet, so phones registered
+with `hermes-push` keep getting pushes.
 
 ## Tests
 

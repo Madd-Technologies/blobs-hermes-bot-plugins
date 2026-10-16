@@ -1,5 +1,5 @@
-"""The phone app's side of hermes-bot-mobile: register a device, change how loud each bot is, send a test, and read
-what each bot in a group room is doing right now.
+"""The phone app's side of hermes-bot-mobile: register a device, change how loud each bot is, send a test, read what
+each bot in a group room is doing right now, and set up where a bot's commands run (its SSH key and a connection check).
 
 Mounted by `hermes serve` under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's own sign-in, so only someone
 who can already use the server can reach it. Hermes imports this file on its own, apart from the plugin package,
@@ -49,6 +49,39 @@ def _activity():
     return importlib.import_module(f"{_PACKAGE}.activity")
 
 
+def _runs_on():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.runs_on")
+
+
+def _profile_exists(profile: str) -> bool:
+    """A bot this server has: `default`, or a folder under the root's `profiles/`."""
+    from hermes_constants import get_default_hermes_root
+
+    return profile == "default" or (get_default_hermes_root() / "profiles" / profile).is_dir()
+
+
+def _keys():
+    store_module, _ = _modules()
+
+    return _runs_on().Keys(store_module.default_dir() / "ssh")
+
+
+def _known_bot(profile: str) -> str:
+    runs_on = _runs_on()
+
+    try:
+        runs_on.check_profile(profile)
+    except runs_on.Invalid as failure:
+        raise HTTPException(status_code=422, detail=str(failure))
+
+    if not _profile_exists(profile):
+        raise HTTPException(status_code=404, detail=f"No bot called {profile} on this server.")
+
+    return profile
+
+
 router = APIRouter()
 
 
@@ -67,6 +100,21 @@ class SettingsIn(BaseModel):
 
 class TestIn(BaseModel):
     device: str | None = None
+
+
+class KeyIn(BaseModel):
+    profile: str
+
+
+class CheckIn(BaseModel):
+    profile: str
+    #: "ssh" or "docker" (a bot on this computer needs no check).
+    backend: str = "ssh"
+    host: str = ""
+    user: str = ""
+    port: int = 22
+    #: The private key's full path on this server; empty uses ssh's own defaults, as Hermes does.
+    key: str = ""
 
 
 class PresenceIn(BaseModel):
@@ -176,3 +224,45 @@ def room_activity(room_id: str) -> dict:
         raise HTTPException(status_code=400, detail="That is not a room id.")
 
     return {"members": activity.RoomActivity().read(room_id), "now": time.time()}
+
+
+@router.get("/runs-on/key")
+def runs_on_key(profile: str) -> dict:
+    """The bot's public SSH line, or `{public: null}` before one is made. (A 404 here means an older plugin.)"""
+    keys = _keys()
+    profile = _known_bot(profile)
+
+    return {"public": keys.public(profile), "path": str(keys.path(profile))}
+
+
+@router.post("/runs-on/key")
+def make_runs_on_key(body: KeyIn) -> dict:
+    """Makes the bot's key pair on this server if it has none: `{public, path, created}`. The private key stays here."""
+    keys = _keys()
+    profile = _known_bot(body.profile)
+
+    try:
+        return keys.make(profile)
+    except FileNotFoundError as failure:
+        raise HTTPException(status_code=503, detail=str(failure))
+    except Exception as failure:  # ssh-keygen failed: say so, never a stack trace
+        raise HTTPException(status_code=500, detail=f"Could not make a key: {failure}")
+
+
+@router.post("/runs-on/check")
+def check_runs_on(body: CheckIn) -> dict:
+    """Connects the way the bot will: `{ok: true, system}` or `{ok: false, reason, detail}`. `reason` is one of auth,
+    host_key, unknown_host, refused, timeout, unreachable, key_missing, no_ssh, no_docker, docker_down or other."""
+    runs_on = _runs_on()
+    _known_bot(body.profile)
+
+    if body.backend == "docker":
+        return runs_on.check_docker()
+
+    if body.backend != "ssh":
+        raise HTTPException(status_code=422, detail="Only ssh and docker can be checked.")
+
+    try:
+        return runs_on.check_ssh(body.host, body.user, body.port, body.key)
+    except runs_on.Invalid as failure:
+        raise HTTPException(status_code=422, detail=str(failure))
