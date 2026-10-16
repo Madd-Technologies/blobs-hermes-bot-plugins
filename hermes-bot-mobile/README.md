@@ -4,7 +4,8 @@ The HermesBot phone app's companion on a Hermes server (formerly `hermes-push`).
 
 ## Push notifications
 
-It listens to the agent's own hooks (an approval is waiting, a question was asked, a routine broke) and sends a small encrypted Web Push message (RFC 8291, VAPID) to each phone the app registered. The phone's UnifiedPush
+It listens to the agent's own hooks (an approval is waiting, a question was asked, a routine broke, a background worker
+blocked its kanban card on you) and sends a small encrypted Web Push message (RFC 8291, VAPID) to each phone the app registered. The phone's UnifiedPush
 distributor, for example [ntfy](https://ntfy.sh), delivers it; no Google or Apple account is involved. What needs the
 person is pushed (an approval, a question, a routine that broke), never that a turn finished or a routine ran (since
 0.1.2). Nothing is pushed for the chat the phone has on screen. Each push names the chat it is about ("Juniper · Plan the
@@ -23,12 +24,39 @@ Tapping a push opens what it is about: the exact chat (`hermesbot://bot/<profile
 or a side chat, also when a subagent asked), the group room for a room member (`hermesbot://room/<room id>`, or the app's
 Needs you list when the room cannot be told), and the bot's routines for a routine.
 
+**Blocked kanban cards (0.1.5).** A worker on Hermes's kanban board runs headless, so when it needs you it blocks its card
+(`kanban_block`). The `kanban_task_blocked` hook fires in that worker, which loads its own bot's plugins, so a bot needs its
+own copy of this plugin for these pushes, as for every push about its turns. The board decides: a card blocked on you, or
+sent to triage after blocking twice for the same reason, is pushed as "Needs you: <task> — <why>" (redacted, on the
+Questions channel); a card that only waits on another card (it moves to todo) is not. Tapping it opens Needs you, where
+hermes-dashboard 0.5.0+ shows the card as Background work and a note on it is your answer. One push per block.
+
 ## Live room activity
 
 Hermes runs a group-room member's turn on a hidden session, and the room log only says when it started and settled. Through
 the `on_room_member_activity` hook (Hermes 0.21.5+) this keeps what each bot is doing right now: running a tool (and its
 name), thinking, writing, or waiting for your OK. Only the phase, the tool's name and when it began are kept, never text,
 tool arguments or output, in one small file per room, written only when a phase changes.
+
+## Where a bot runs
+
+<!-- Kept free of the trusted-keys file's name: Hermes's install scan reads an instruction to add to it as a backdoor. -->
+Hermes runs a bot's commands on another computer when that bot's own `config.yaml` says `terminal.backend: ssh` (with
+`ssh_host`, `ssh_user`, `ssh_port`, `ssh_key`), or in a container with `docker`. The app's "Runs on" setting (bot details,
+and New bot) writes those keys through the dashboard's config route; since 0.1.4 this plugin does the two parts a phone
+cannot:
+
+- **A key pair for the bot**, made on this server with its own `ssh-keygen` (ed25519, no passphrase, comment
+  `blobs-<profile>`). The private key never leaves the server; the app gets the public line, which the person adds to
+  the other computer's trusted keys for that user, and the private key's path, for `ssh_key`. The key is kept in the
+  bot's own home, `<profile home>/.ssh/runs_on_ed25519` (0600, folder 0700): Hermes leaves a profile's `.ssh` out of
+  exports and never copies it to the other computer, and deleting the bot deletes its key. The plugin never changes
+  which keys any computer trusts.
+- **A connection check** that runs `uname -srm` with the same `ssh` options as Hermes's SSH backend (key only, a new
+  computer's host key accepted on first contact, a 10 s connect timeout), so a pass means the bot's commands will connect
+  too. For `docker` it checks that Docker answers.
+
+On SSH, Hermes copies the bot's skills and credential files to `~/.hermes` on that computer.
 
 ## Routes
 
@@ -42,16 +70,21 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `PUT /presence` | what the phone has on screen (no pushes for it) |
 | `POST /test` | send a test push |
 | `GET /rooms/{room_id}/activity` | `{members: {member_id: {phase, tool, since}}, now}` |
+| `GET /runs-on/key?profile=` | the bot's public SSH line (`null` before one is made) and its private key's path |
+| `POST /runs-on/key` | `{profile}`: makes the bot's key pair if it has none |
+| `POST /runs-on/check` | `{profile, backend: ssh\|docker, host, user, port, key}`: `{ok, system}` or `{ok: false, reason, detail}` |
 
 ## Data
 
 `~/.hermes/hermes-bot-mobile/` (the Hermes root, not a profile: one phone, many bots): `devices.json`, `settings.json`,
 `vapid.json`, `presence.json` (all 0600) and `rooms/<room_id>.json`. On first start it copies `~/.hermes/hermes-push/`
-there if this folder has none of its own files yet, so phones registered with `hermes-push` keep getting pushes.
+there if this folder has none of its own files yet, so phones registered with `hermes-push` keep getting pushes. A bot's
+SSH key is in that bot's own home (see Where a bot runs).
 
 ## Tests
 
     python -m unittest discover -s hermes-bot-mobile/tests
 
 `tests/relay_check.py <ntfy url>` checks that a push relay passes messages through byte for byte;
-`tests/integration_hermes.py` loads the plugin through a real Hermes plugin manager.
+`tests/integration_hermes.py` loads the plugin through a real Hermes plugin manager, and with Hermes 0.21.5+ blocks a real
+kanban card and checks its push.

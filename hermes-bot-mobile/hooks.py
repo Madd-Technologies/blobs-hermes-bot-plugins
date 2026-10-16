@@ -151,6 +151,34 @@ def bot_name(profile: str) -> str:
     return "Hermes" if profile == "default" else profile.replace("-", " ").replace("_", " ").title()
 
 
+def kanban_card(board, task_id: str) -> dict | None:
+    """A kanban card as it is now (`title`, `status`, `loop`, `reason`), read from Hermes's board, or None."""
+    try:
+        from hermes_cli import kanban_db as kb
+
+        try:
+            from hermes_cli.kanban_db_connect import connect
+        except ImportError:  # before 0.21.5 it lived in kanban_db
+            connect = kb.connect
+
+        conn = connect(board=board or None)
+
+        try:
+            task = kb.get_task(conn, str(task_id))
+
+            if task is None:
+                return None
+
+            events = kb.list_events(conn, task.id)
+            event = next((event for event in reversed(events) if event.kind in ("blocked", "block_loop_detected")), None)
+
+            return {"title": task.title, "status": task.status, "loop": bool(event and event.kind == "block_loop_detected"), "reason": ((event.payload or {}).get("reason") if event else None) or task.last_failure_error or ""}
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 def pending_request_id(session_key: str, command: str) -> str:
     """The id Hermes gave this approval, so the same one is never pushed twice (None-safe: returns "" on any doubt)."""
     try:
@@ -189,7 +217,7 @@ def question_text(args) -> str:
 
 
 class PushHooks:
-    def __init__(self, store: DeviceStore | None = None, pusher: notify.Pusher | None = None, profile=current_profile, name=bot_name, context=turn_context, title=chat_title, routine=routine_name):
+    def __init__(self, store: DeviceStore | None = None, pusher: notify.Pusher | None = None, profile=current_profile, name=bot_name, context=turn_context, title=chat_title, routine=routine_name, card=kanban_card):
         self.store = store or DeviceStore()
         self.pusher = pusher or notify.Pusher(self.store)
         self.dedupe = notify.Dedupe()
@@ -198,6 +226,7 @@ class PushHooks:
         self._context = context
         self._title = title
         self._routine = routine
+        self._card = card
 
     # -- helpers -----------------------------------------------------------------------------------------------
 
@@ -214,11 +243,11 @@ class PushHooks:
 
         return {"chat": chat_id(context["chat"], *ids)}
 
-    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None, slot: str = "") -> None:
-        """Push one thing for the person: an approval, a question, a routine that broke, or (only for a bot set to `all`)
-        the start of a reply. That a turn finished or a routine ran is never pushed: it shows on Home and in the bot's
+    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None, slot: str = "", profile: str = "") -> None:
+        """Push one thing for the person: an approval, a question, a routine that broke, a blocked kanban card, or (only for
+        a bot set to `all`) the start of a reply. That a turn finished or a routine ran is never pushed: it shows on Home and in the bot's
         routines, and a buzz for it is noise. `slot` is what a newer push of the same kind replaces (a chat's last reply)."""
-        profile = self._profile()
+        profile = profile or self._profile()
         level = self.store.level(profile)
 
         if level == "off" or (kind == "reply" and level != "all"):
@@ -300,6 +329,23 @@ class PushHooks:
         session = str(kw.get("session_id") or "")
         self._emit("routine", session, detail=self._routine(session), failed=True, target={"page": "routines"})
 
+    def on_kanban_blocked(self, **kw) -> None:
+        # A background worker on the kanban board stopped because it needs its person (it runs headless and can't ask).
+        # The board says whether the card really waits on them: one waiting on another card moves to todo instead, and one
+        # blocked again for the same reason goes to triage for a person.
+        task = str(kw.get("task_id") or "")
+        card = self._card(kw.get("board"), task) if task else None
+
+        if not card or not (card["status"] == "blocked" or (card["status"] == "triage" and card.get("loop"))):
+            return
+
+        what = notify.tidy(notify.redact(card.get("title") or ""), 40)
+        why = notify.redact(card.get("reason") or kw.get("reason") or "")
+        detail = f"{what} — {why}" if what and why.strip() else what or why
+        profile = str(kw.get("assignee") or kw.get("profile_name") or "")
+        # The Needs you list, where the app shows the card (its dashboard copies it from the board when it is read).
+        self._emit("blocked", f"{kw.get('board') or 'default'}/{task}:{kw.get('run_id')}", detail=notify.tidy(detail), target={"inbox": True}, profile=profile)
+
     def callbacks(self) -> dict:
         """Hook name -> callback, each wrapped so that nothing it does can reach the bot."""
         def guard(callback):
@@ -316,4 +362,5 @@ class PushHooks:
             "pre_tool_call": guard(self.on_tool),
             "post_llm_call": guard(self.on_reply),
             "on_session_end": guard(self.on_session_end),
+            "kanban_task_blocked": guard(self.on_kanban_blocked),
         }
