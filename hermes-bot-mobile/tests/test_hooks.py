@@ -96,15 +96,114 @@ class Questions(Setup):
 
 
 class NoNewsIsNotPushed(Setup):
-    """A reply that finished or a routine that ran is never a push: they show on Home and in the bot's routines."""
+    """That a turn finished or a routine ran is never a push: they show on Home and in the bot's routines."""
 
-    def test_nothing_listens_for_turns_finishing(self):
-        self.assertNotIn("post_llm_call", self.hooks.callbacks())
+    def test_no_turn_timing(self):
         self.assertNotIn("pre_llm_call", self.hooks.callbacks())
 
     def test_a_routine_that_ran_is_not_pushed(self):
         self.hooks.on_session_end(session_id="cron_0a1b2c3d4e5f_20260101_090000", platform="cron", failed=False)
         self.assertEqual(self.net.calls, [])
+
+
+MAIN = "20261015_090000_aa11bb"
+SIDE = "20261015_100000_cc22dd"
+
+
+class Replies(Setup):
+    """A bot's answer in one of the person's chats reads like a message: "Juniper", then its first words."""
+
+    def reply(self, answer="The quote came back at $640. They can come on Tuesday or Thursday morning.", **kw):
+        args = dict(session_id=MAIN, turn_id="t1", user_message="Any news on the quote?", assistant_response=answer, platform="tui")
+        args.update(kw)
+        self.hooks.on_reply(**args)
+
+    def test_a_reply_shows_the_bot_and_the_start_of_its_answer(self):
+        self.reply()
+        (message,) = self.sent()
+        self.assertEqual(message["title"], "Juniper")
+        self.assertEqual(message["body"], "The quote came back at $640. They can come on Tuesday or Thursday morning.")
+        self.assertEqual(message["type"], "Replies")
+        self.assertEqual(message["url"], f"hermesbot://bot/juniper?chat={MAIN}")
+
+    def test_a_long_answer_is_cut_at_a_word_and_markdown_goes(self):
+        self.reply(answer="## Plan\n\n**Three** things, see [the doc](https://example.com/x):\n\n- " + "word " * 60)
+        (message,) = self.sent()
+        self.assertTrue(message["body"].startswith("Plan Three things, see the doc: word word"))
+        self.assertTrue(message["body"].endswith("word…"))
+        self.assertLessEqual(len(message["body"]), notify.REPLY_LIMIT)
+
+    def test_a_side_chat_is_named_and_opens_itself(self):
+        self.titles[SIDE] = "Plan the week"
+        self.reply(session_id=SIDE)
+        (message,) = self.sent()
+        self.assertEqual(message["title"], "Juniper · Plan the week")
+        self.assertEqual(message["url"], f"hermesbot://bot/juniper?chat={SIDE}")
+
+    def test_a_newer_reply_in_the_same_chat_replaces_the_last_one(self):
+        self.reply(turn_id="t1")
+        self.reply(turn_id="t2", answer="Booked for Tuesday.")
+        self.reply(turn_id="t2", answer="Booked for Tuesday.")
+        first, second = self.sent()
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(second["body"], "Booked for Tuesday.")
+
+    def test_only_the_persons_own_chats(self):
+        # Another bot's message (a `hermes -p <bot> chat` run), a room member, a subagent, a routine's run, a chat app.
+        for platform in ("cli", "bot_room", "subagent", "cron", "telegram", ""):
+            with self.subTest(platform=platform):
+                self.reply(platform=platform, turn_id=f"t-{platform}")
+        self.assertEqual(self.net.calls, [])
+
+    def test_not_what_woke_the_bot_without_the_person(self):
+        for asked in (
+            '[Cronjob "Morning brief" output — scheduled job, not the user. Review it and summarize for the chat.]\n…',
+            "[Background process proc_1 heartbeat #2 — still running after 2m 0s]\nOutput since last heartbeat:\n…",
+            "[IMPORTANT: Background process proc_9 completed normally (exit code 0).\nCommand: python3 bot_mode_dm.py --run-delivery …]",
+            "Message from 🤖 orion (@orion): got it",
+        ):
+            with self.subTest(asked=asked[:30]):
+                self.reply(user_message=asked, turn_id=asked[:20])
+        self.assertEqual(self.net.calls, [])
+
+    def test_a_finished_background_job_the_bot_reports_on_is_a_reply(self):
+        self.reply(user_message="[IMPORTANT: Background process proc_1 completed normally (exit code 0).\nCommand: npm test]", answer="All 214 tests pass.")
+        self.assertEqual([m["body"] for m in self.sent()], ["All 214 tests pass."])
+
+    def test_an_empty_or_silent_answer_is_not(self):
+        for answer in ("", "   ", "(pass)", "[SILENT]"):
+            self.reply(answer=answer, turn_id=f"t{len(answer)}")
+        self.assertEqual(self.net.calls, [])
+
+    def test_a_room_member_is_not(self):
+        self.context.update(source="bot_room", room="r-garden")
+        self.reply()
+        self.assertEqual(self.net.calls, [])
+
+    def test_only_for_a_bot_set_to_everything(self):
+        self.store.set_settings("needs_you", None)
+        self.reply()
+        self.assertEqual(self.net.calls, [])
+        self.store.set_settings("all", {"juniper": "off"})
+        self.reply(turn_id="t2")
+        self.assertEqual(self.net.calls, [])
+        self.store.set_settings(None, {"juniper": "all"})
+        self.reply(turn_id="t3")
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_not_while_the_app_is_in_front(self):
+        self.store.set_presence(self.store.devices()[0]["id"], [], True, 45.0)
+        self.reply()
+        self.assertEqual(self.net.calls, [])
+        self.store.set_presence(self.store.devices()[0]["id"], [], False, 45.0)
+        self.reply(turn_id="t2")
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_a_secret_in_the_answer_is_redacted(self):
+        with mock.patch.object(notify, "redact", lambda text: str(text).replace("sk-live-123", "[REDACTED]")):
+            self.reply(answer="Your key is sk-live-123, keep it safe.")
+        (message,) = self.sent()
+        self.assertNotIn("sk-live-123", json.dumps(message))
 
 
 class WhileThePhoneIsInFront(Setup):
@@ -341,7 +440,7 @@ class LoadedLikeHermes(unittest.TestCase):
 
             self.assertEqual(
                 set(registered),
-                {"pre_approval_request", "pre_tool_call", "on_session_end", "on_room_member_activity"},
+                {"pre_approval_request", "pre_tool_call", "post_llm_call", "on_session_end", "on_room_member_activity"},
             )
         finally:
             for key in [k for k in sys.modules if k == name or k.startswith(name + ".")]:

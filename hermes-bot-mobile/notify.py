@@ -1,9 +1,11 @@
 """Turning "a bot needs you" into a push on the phone, without ever blocking the bot.
 
 A notification carries as little as possible: the bot and the chat or routine it is about, what it wants in a few words,
-and where tapping it should land. **Never the command**, and never a result: a lock screen is not private. Only what
-needs the person is pushed (an approval, a question, a routine that broke), never that a reply finished or a routine ran. The app fetches the real thing
-(with its Allow / Deny buttons) once the person opens it.
+and where tapping it should land. **Never the command.** What needs the person is pushed (an approval, a question, a
+routine that broke), and, for a bot set to `all`, the start of a reply it gave in one of the person's chats, the way a
+messaging app shows a message ("Juniper: The quote came back at…"); never that a turn finished or a routine ran. A reply
+goes under its own channel ("Replies"), so the phone's lock-screen settings can hide its words. The app fetches the real
+thing (with its Allow / Deny buttons) once the person opens it.
 """
 
 from __future__ import annotations
@@ -28,13 +30,15 @@ except ImportError:  # the tests import the modules flat
 log = logging.getLogger("hermes-bot-mobile")
 
 #: The notification channel the phone files each kind under (its name is what the person sees in Android settings).
-CHANNELS = {"approval": "Approvals", "question": "Questions", "routine": "Routines", "test": "Results"}
+CHANNELS = {"approval": "Approvals", "question": "Questions", "routine": "Routines", "reply": "Replies", "test": "Results"}
 
 #: Seconds a push may wait in the push service if the phone is off, and how it is flagged for delivery.
-TTL_SECONDS = {"approval": 300, "question": 3600, "routine": 3600, "test": 60}
-URGENCY = {"approval": "high", "question": "high", "routine": "normal", "test": "high"}
+TTL_SECONDS = {"approval": 300, "question": 3600, "routine": 3600, "reply": 3600, "test": 60}
+URGENCY = {"approval": "high", "question": "high", "routine": "normal", "reply": "normal", "test": "high"}
 
 BODY_LIMIT = 80
+#: A reply's preview: about two lines on the shade, the rest when it is expanded (the phone shows it as big text).
+REPLY_LIMIT = 160
 #: Room for "Bot · the chat's title".
 TITLE_LIMIT = 60
 SEND_TIMEOUT = 10.0
@@ -47,20 +51,52 @@ def tidy(text: str, limit: int = BODY_LIMIT) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
+def redact(text: str) -> str:
+    """Hermes's own redaction of secrets (keys, tokens, passwords) in text that leaves the server; the text as it is when
+    Hermes's internals are not there (tests)."""
+    try:
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(str(text or ""), force=True)
+    except Exception:
+        return str(text or "")
+
+
+#: Markdown that reads as noise in one line of plain text.
+_FENCE = re.compile(r"```[^\n]*\n?([\s\S]*?)```")
+_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARK = re.compile(r"(\*\*|__|~~|`)")
+_LINE_START = re.compile(r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+|\|)", re.M)
+_TABLE_RULE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$", re.M)
+
+
+def preview(text: str, limit: int = REPLY_LIMIT) -> str:
+    """The start of a reply as plain words, cut at a word with an ellipsis: what a messaging app shows of a message.
+    Secrets are redacted first; code blocks keep their text, links their label, and markup goes."""
+    plain = redact(text)
+    plain = _FENCE.sub(lambda match: match.group(1), plain)
+    plain = _LINK.sub(lambda match: match.group(1), plain)
+    plain = _TABLE_RULE.sub("", plain)
+    plain = _LINE_START.sub("", plain)
+    plain = _MARK.sub("", plain).replace("|", " ")
+    flat = re.sub(r"\s+", " ", plain).strip()
+
+    if len(flat) <= limit:
+        return flat
+
+    cut = flat[: limit - 1]
+    space = cut.rfind(" ")
+
+    return (cut[:space] if space > limit // 2 else cut).rstrip(" ,;:.-") + "…"
+
+
 def describe(description: str, command: str) -> str:
     """What an approval is for, from the server's own description, or a generic line when that would expose the command.
 
     The description is normally a short label ("recursive delete"). Some scanners quote what they found, so it is
     redacted, and dropped if it repeats a stretch of the command.
     """
-    text = str(description or "")
-
-    try:
-        from agent.redact import redact_sensitive_text
-
-        text = redact_sensitive_text(text, force=True)
-    except Exception:  # Hermes internals unavailable (tests): fall through to the command check below
-        pass
+    text = redact(description)
 
     command = str(command or "").strip()
     window = 12
@@ -107,7 +143,7 @@ def build(kind: str, *, profile: str, bot: str, body: str, key: str, url: str | 
     return {
         "id": notification_id(kind, profile, key),
         "title": tidy(bot, TITLE_LIMIT) or "Hermes",
-        "body": tidy(body),
+        "body": body if kind == "reply" else tidy(body),
         "type": CHANNELS[kind],
         "url": url or link(profile),
     }
@@ -120,6 +156,9 @@ def lines(kind: str, *, detail: str = "", failed: bool = False) -> str:
 
     if kind == "question":
         return f"Asks: {detail}" if detail else "Has a question for you"
+
+    if kind == "reply":
+        return detail
 
     # A routine is only pushed when it broke.
     return f"Routine “{detail}” failed" if detail else "A routine failed"

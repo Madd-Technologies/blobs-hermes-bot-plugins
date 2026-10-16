@@ -32,6 +32,23 @@ MAIN_CHAT_TITLE = "bot chat"
 #: A routine run's session id (`cron_<job id>_<YYYYmmdd>_<HHMMSS>`), which names the job.
 CRON_SESSION = re.compile(r"^cron_(.+)_\d{8}_\d{6}$")
 
+#: Where a turn runs when it is one of the person's own chats: the app, Hermes Desktop and the dashboard all talk to the
+#: same gateway. Everything else is not a chat the person had (another bot's message runs as `hermes -p <bot> chat`,
+#: "cli"; a room member, "bot_room"; a subagent; a routine's run, "cron") or has its own notifications (Telegram...).
+CHAT_PLATFORMS = frozenset({"tui"})
+
+#: Turns in a chat that the person did not start, by what woke the bot (the wording Hermes stores them with): a routine's
+#: output handed to the bot to sum up, a background process's heartbeat, the answer to a message this bot sent another bot.
+NOT_FOR_THE_PERSON = (
+    re.compile(r'^\[Cronjob\s+"'),
+    re.compile(r"^\[Background process \S+ heartbeat #"),
+    re.compile(r"bot_mode_dm\.py\s+--run-delivery|tools/bot_relay\.py"),
+    re.compile(r"^Message from (?:agent '|🤖)"),
+)
+
+#: Replies that say nothing: a room member passing, a routine told to stay quiet.
+SILENT_REPLIES = frozenset({"(pass)", "[silent]", "silent"})
+
 
 def turn_context() -> dict:
     """What Hermes knows about the turn the calling thread works for: `chat`, the persistent id of the chat it belongs to
@@ -197,18 +214,21 @@ class PushHooks:
 
         return {"chat": chat_id(context["chat"], *ids)}
 
-    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None) -> None:
-        """Push one thing that needs the person: an approval, a question, or a routine that broke. Finished replies and
-        routines that ran are never pushed: they show on Home and in the bot's routines, and a buzz for them is noise."""
+    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None, slot: str = "") -> None:
+        """Push one thing for the person: an approval, a question, a routine that broke, or (only for a bot set to `all`)
+        the start of a reply. That a turn finished or a routine ran is never pushed: it shows on Home and in the bot's
+        routines, and a buzz for it is noise. `slot` is what a newer push of the same kind replaces (a chat's last reply)."""
         profile = self._profile()
+        level = self.store.level(profile)
 
-        if self.store.level(profile) == "off":
+        if level == "off" or (kind == "reply" and level != "all"):
             return
 
-        # The phone is in front with this chat on screen: the card is already in front of the person.
+        # The phone is in front with this chat on screen: the card is already in front of the person. A reply is in front
+        # of them as soon as the app is: Home shows it.
         seen = self.store.presence()
 
-        if seen["foreground"] and session and session in seen["sessions"]:
+        if seen["foreground"] and (kind == "reply" or (session and session in seen["sessions"])):
             return
 
         if not self.store.devices() or not self.dedupe.first(f"{kind}:{profile}:{key}"):
@@ -220,7 +240,7 @@ class PushHooks:
         about = self._title(target.get("chat", "")) if target.get("chat") else ""
         title = f"{self._name(profile)} · {about}" if about else self._name(profile)
         url = notify.INBOX if target.get("inbox") else notify.link(profile, chat=target.get("chat", ""), room=target.get("room", ""), page=target.get("page", ""))
-        self.pusher.send(kind, notify.build(kind, profile=profile, bot=title, body=body, key=key, url=url))
+        self.pusher.send(kind, notify.build(kind, profile=profile, bot=title, body=body, key=slot or key, url=url))
 
     # -- hooks -------------------------------------------------------------------------------------------------
 
@@ -246,6 +266,32 @@ class PushHooks:
         target = self._target(kw.get("session_id"))
         self._emit("question", key, detail=notify.tidy(question_text(kw.get("args"))), session=target.get("chat") or str(kw.get("session_id") or ""), target=target)
 
+    def on_reply(self, **kw) -> None:
+        """A bot gave its final answer in one of the person's chats (`post_llm_call`): its first words, like a message."""
+        if str(kw.get("platform") or "").lower() not in CHAT_PLATFORMS:
+            return
+
+        asked = str(kw.get("user_message") or "")
+
+        if any(pattern.search(asked.strip()) for pattern in NOT_FOR_THE_PERSON):
+            return
+
+        answer = str(kw.get("assistant_response") or "").strip()
+
+        if not answer or answer.lower() in SILENT_REPLIES:
+            return
+
+        session = str(kw.get("session_id") or "")
+        target = self._target(session)
+
+        # A room member's turn, known by its context: the room shows what its members say.
+        if target.get("room") or target.get("inbox") or not target.get("chat"):
+            return
+
+        chat = target["chat"]
+        turn = str(kw.get("turn_id") or kw.get("task_id") or notify.notification_id(answer))
+        self._emit("reply", f"{chat}:{turn}", detail=notify.preview(answer), session=chat, target=target, slot=chat)
+
     def on_session_end(self, **kw) -> None:
         # Only a routine that broke: one that ran fine is no news for the phone.
         if kw.get("platform") != "cron" or kw.get("interrupted") or not kw.get("failed"):
@@ -268,5 +314,6 @@ class PushHooks:
         return {
             "pre_approval_request": guard(self.on_approval),
             "pre_tool_call": guard(self.on_tool),
+            "post_llm_call": guard(self.on_reply),
             "on_session_end": guard(self.on_session_end),
         }
