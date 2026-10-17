@@ -1,6 +1,6 @@
 """The phone app's side of hermes-bot-mobile: register a device, change how loud each bot is, send a test, read what
-each bot in a group room is doing right now, set up where a bot's commands run (its SSH key and a connection check), and
-restart this dashboard (and the gateway) from the app.
+each bot in a group room is doing right now, set up where a bot's commands run (its SSH key and a connection check),
+restart this dashboard (and the gateway) from the app, and Taildrop a file from this server to one of the person's devices.
 
 Mounted by `hermes serve` under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's own sign-in, so only someone
 who can already use the server can reach it. Hermes imports this file on its own, apart from the plugin package,
@@ -9,6 +9,7 @@ so it loads the package's modules by path and shares state with the hooks throug
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import sys
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -78,6 +79,27 @@ def _restarter():
             _RESTARTER = _restart().Restarter()
 
         return _RESTARTER
+
+
+def _taildrop():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.taildrop")
+
+
+#: The one Taildrop sender of this dashboard process: its running sends live in it.
+_TAILDROP = None
+_TAILDROP_LOCK = threading.Lock()
+
+
+def _sender():
+    global _TAILDROP
+
+    with _TAILDROP_LOCK:
+        if _TAILDROP is None:
+            _TAILDROP = _taildrop().Taildrop()
+
+        return _TAILDROP
 
 
 def _refusal(refusal) -> JSONResponse:
@@ -173,6 +195,21 @@ class RestartIn(BaseModel):
     idle_timeout_s: int = Field(600, ge=30, le=1800)
     #: Restart the messaging gateway too (first, through Hermes's own gateway restart).
     include_gateway: bool = False
+
+
+class TaildropIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    #: One of GET /taildrop's targets, by name or Tailscale address.
+    target: str = Field(min_length=1, max_length=255)
+    #: A file, exactly as for GET /api/fs/download (with its `profile` and `session_id`)...
+    path: str | None = Field(None, max_length=4096)
+    profile: str | None = Field(None, max_length=64)
+    session_id: str | None = Field(None, max_length=256)
+    #: ...or a patch's text, sent as `<name>.patch`.
+    diff: str | None = Field(None, max_length=16 * 1024 * 1024)
+    #: The file name the device receives.
+    name: str | None = Field(None, max_length=255)
 
 
 def _public(row: dict) -> dict:
@@ -351,4 +388,52 @@ def cancel_restart():
     try:
         return _restarter().cancel()
     except restart_module.Refused as refusal:
+        return _refusal(refusal)
+
+
+@router.get("/taildrop")
+def taildrop_status(request: Request) -> dict:
+    """Whether this server can Taildrop, and to which devices: `{supported, why, targets: [{name, ip, online, detail,
+    you}], you: {name, os, ip} | null, setup: {needed: "operator", user, command} | null, max_bytes, sending}`. `you` is
+    the device asking (its address as the dashboard saw it, after Hermes's own trusted-proxy handling)."""
+    return _sender().status(request.client.host if request.client else None)
+
+
+@router.post("/taildrop", status_code=202)
+async def taildrop_send(body: TaildropIn):
+    """Send a file the dashboard would let this person download (`path`, `profile`, `session_id`, checked by Hermes's own
+    download check), or a patch (`diff`), to one of the targets: 202 `{id, state, ...}`."""
+    taildrop = _taildrop()
+    sender = _sender()
+
+    try:
+        if (body.path is None) == (body.diff is None):
+            raise taildrop.Refused(422, "Send either a file (`path`) or a patch (`diff`).")
+
+        source = await sender.check(body.path, body.profile, body.session_id) if body.path is not None else None
+
+        return await asyncio.to_thread(sender.send, body.target, source=source, diff=body.diff, name=body.name)
+    except taildrop.Refused as refusal:
+        return _refusal(refusal)
+
+
+@router.get("/taildrop/{send_id}")
+def taildrop_progress(send_id: str):
+    """`{id, state: running|done|failed|cancelled, sent_bytes, total_bytes, error, note, setup, ...}`."""
+    taildrop = _taildrop()
+
+    try:
+        return _sender().progress(send_id)
+    except taildrop.Refused as refusal:
+        return _refusal(refusal)
+
+
+@router.delete("/taildrop/{send_id}")
+def taildrop_cancel(send_id: str):
+    """Stop a running send (its CLI is terminated): `{cancelled: true, id}`."""
+    taildrop = _taildrop()
+
+    try:
+        return _sender().cancel(send_id)
+    except taildrop.Refused as refusal:
         return _refusal(refusal)

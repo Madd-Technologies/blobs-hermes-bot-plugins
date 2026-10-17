@@ -122,6 +122,53 @@ the restarted one: the process that asked is gone and this one started after), `
 ago and the same process still answers), `cancelled`, `replaced`, `timed_out`, `failed` or `interrupted` (the
 dashboard stopped before the request was carried out).
 
+## Taildrop from the server
+
+Since 0.1.6 the app's file viewer can send the file it shows to one of the person's devices with
+[Taildrop](https://tailscale.com/kb/1106/taildrop): this server runs `tailscale file cp`, so the file goes from the
+server to the device over the tailnet and never through the phone. It needs Tailscale on the server, and Hermes
+0.21.5 or later (for its download check).
+
+**Only what the dashboard would let this person download.** Every file goes through Hermes's own download check, the
+functions behind `GET /api/fs/download` (`_fs_download_path` and `_fs_regular_file` in `hermes_cli.web_routers.files`),
+called in the dashboard's process with the same `path`, `profile` and `session_id`. The plugin's reach is therefore
+exactly that route's, and a refusal comes back with the route's own status and words. Hermes's route has no root
+folder: it serves any regular file the dashboard's user can read, after resolving links (`..` and links resolved
+first, so a link to `.env` is refused as `.env`), except credential files (`.env`, `auth.json`, `config.yaml`,
+`mcp-tokens/` and the rest of its list); `profile` must name a bot that exists, and `session_id` makes a relative path
+resolve against that chat's folder. A Hermes without those functions sends nothing (409) rather than being checked
+some looser way. Hermes's `_is_sensitive_path` is asked once more when it exists (it can only narrow). The file is then
+opened without following a link and must be the very file Hermes checked (same device and inode); the CLI is handed
+that open file (`/dev/fd/<n>`) with `--name=<file name>`, so nothing can be swapped in between the check and the send.
+
+**Only a device Taildrop offers.** `target` must be one of `tailscale file cp --targets` (by name or address), read
+again for every send; the CLI is given that device's own Tailscale address from the list, never the request's words.
+The list has no JSON form, so its tab-separated lines (`<address>  <name>  [offline; last seen …]`) are parsed, and
+lines that do not start with an address are skipped. `you` in the status is the device asking: its address as the
+dashboard saw it (after Hermes's own `dashboard.trusted_proxies` handling; the plugin never reads `X-Forwarded-For`
+itself) through `tailscale whois --json`.
+
+**A patch** (`diff`) is written to a private temporary folder as `<name>.patch`, sent the same way, and deleted when the
+CLI is done, whatever the outcome.
+
+**Progress.** The CLI runs in the background with argv only. It draws its progress line only on a terminal, so its
+stderr is a pseudo-terminal, and that line (tailscaled's count of what the device has received) gives `sent_bytes`.
+Anything else it prints is kept as its words: `error` when it fails, `note` for its warnings ("… is not replying;
+trying anyway"). Cancelling terminates it.
+
+**The operator.** On Linux only root and Tailscale's operator may send through tailscaled. When the CLI says
+"Access denied", the send fails with `setup: {needed: "operator", user, command}`, where `command` is the one-time
+command the CLI itself advises (`tailscale set --operator=<this user>`, run as root), and `GET /taildrop` keeps
+showing it until a send gets through.
+
+**Limits.** One send per device at a time (409) and three in all (429). Files up to 2 GiB, or
+`HERMES_BOT_TAILDROP_MAX_BYTES` (413 above it); patches up to 16 MiB. It answers `supported: false` with a reason when
+`tailscale` is not installed, tailscaled is not running or not reachable by this user, Tailscale is not connected, or
+Taildrop is off for this server.
+
+**The log.** The last 20 sends are kept in `taildrop.json`: when, the device, the file's name, its size, the outcome
+and the CLI's message. Never a path or the contents.
+
 ## Routes
 
 Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
@@ -140,12 +187,16 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `GET /restart` | read only: `{supported, why, unit, scope, pid, started_at, now, busy: [{id, session, title, profile, status}] \| null, gateway: {route, restart, same_unit}, last, retry_after}` |
 | `POST /restart` | `{when: now\|idle, idle_timeout_s: 30-1800 (600), include_gateway: false}`: 202 `{accepted, id, mode, unit, include_gateway}`; 409 `{detail}`, 429 `{detail, retry_after}` |
 | `DELETE /restart` | cancels the restart waiting for idle: `{cancelled: true, id}`; 404 when none waits, 409 once it is under way |
+| `GET /taildrop` | `{supported, why, targets: [{name, ip, online, detail, you}], you: {name, os, ip} \| null, setup, max_bytes, sending}` |
+| `POST /taildrop` | `{target, path?, profile?, session_id?, diff?, name?}` (a `path` or a `diff`): 202 `{id, state: running, …}`; the download route's own 400/403/404, 409, 413, 422, 429 |
+| `GET /taildrop/{id}` | `{id, state: running\|done\|failed\|cancelled, sent_bytes, total_bytes, error, note, setup, name, target, …}` |
+| `DELETE /taildrop/{id}` | stops a running send: `{cancelled: true, id}`; 404 unknown, 409 already finished |
 
 ## Data
 
 `~/.hermes/hermes-bot-mobile/` (the Hermes root, not a profile: one phone, many bots): `devices.json`, `settings.json`,
-`vapid.json`, `presence.json`, `restarts.json` (all 0600) and `rooms/<room_id>.json`, plus `gateway-restart.log` when a
-Hermes without its own gateway spawner restarts the gateway. On first start it copies `~/.hermes/hermes-push/`
+`vapid.json`, `presence.json`, `restarts.json`, `taildrop.json` (all 0600) and `rooms/<room_id>.json`, plus
+`gateway-restart.log` when a Hermes without its own gateway spawner restarts the gateway. On first start it copies `~/.hermes/hermes-push/`
 there if this folder has none of its own files yet, so phones registered with `hermes-push` keep getting pushes. A bot's
 SSH key is in that bot's own home (see Where a bot runs).
 
@@ -157,4 +208,7 @@ SSH key is in that bot's own home (see Where a bot runs).
 `tests/integration_hermes.py` loads the plugin through a real Hermes plugin manager, and with Hermes 0.21.5+ blocks a real
 kanban card and checks its push. The unit tests fake systemd; `tests/integration_restart.py` is the end-to-end check of
 restarting on a Linux server: it restarts a throwaway transient unit of its own (never Hermes) and lists the checks to
-make on the real dashboard.
+make on the real dashboard. The Taildrop tests fake the CLI with its real output formats; with `HERMES_AGENT` set to a
+Hermes 0.21.5+ checkout they also ask Hermes's real download route and the plugin the same questions
+(`tests/parity_taildrop.py`) and expect the same answers. `tests/integration_taildrop.py` is the end-to-end check on a
+Linux server with Tailscale (read only, or `--send <device>` for one small file).
