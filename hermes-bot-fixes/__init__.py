@@ -7,8 +7,13 @@
   unfinished work; the result is (`compaction.py`).
 - A background task that comes back unfinished is handed to a new background worker (a kanban card for the bot itself, or
   delegate_task), not finished by the bot in the chat the person talks to it in (`handoff.py`).
+- A bot answering a teammate's message answers in its reply only, not also with message_agent back to that teammate
+  (`dmreply.py`).
 
-Install it for the default profile only: the fixes apply to the whole process, so every bot it runs is covered.
+The fixes apply to the whole process, so the default profile's copy covers every bot that the dashboard and the messaging
+gateway run. A bot whose chat is not open there answers a teammate in a one-shot `hermes -p <bot> chat`, which loads only
+that bot's own plugins, so each bot that teammates message needs its own copy too; copies in one process share the fixes
+and run one database guard.
 Nothing here edits Hermes's own files; each fix checks that the code it wraps is the one it expects.
 """
 
@@ -20,11 +25,12 @@ log = logging.getLogger("hermes-bot-fixes")
 
 
 def register(ctx) -> None:
-    from . import capture, compaction, dbguard, handoff
+    from . import capture, compaction, dbguard, dmreply, handoff
 
     applied = capture.apply()
     restatement = compaction.apply()
     handing_off = handoff.apply()
+    reply_once = dmreply.apply()
 
     def on_tool(**kw):
         # computer_use may only be importable once a turn first uses it; apply what is still missing then.
@@ -36,4 +42,4 @@ def register(ctx) -> None:
 
     ctx.register_hook("pre_tool_call", on_tool)
     started = dbguard.start()
-    log.info("hermes-bot-fixes: panels %s, settle %s, compaction %s, hand-off %s, database guard %s", applied["panels"], applied["settle"], restatement, handing_off, "started" if started else "already running")
+    log.info("hermes-bot-fixes: panels %s, settle %s, compaction %s, hand-off %s, reply once %s, database guard %s", applied["panels"], applied["settle"], restatement, handing_off, reply_once, "started" if started else "already running")

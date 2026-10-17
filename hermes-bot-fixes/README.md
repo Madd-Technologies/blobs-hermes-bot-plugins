@@ -35,14 +35,26 @@ and logged), so a newer Hermes that changed it simply goes unpatched.
   result replayed after a restart doesn't queue the work twice. Unfinished means it hit its step cap, timed out, stalled
   or was cut off by a server restart; a stop the person pressed, an error, a cancel or a refusal to start keeps Hermes's
   own note. For the card route a bot needs the kanban toolset (`hermes -p <bot> tools enable kanban`).
+- **Every answer to another bot arrives twice.** In Bot Mode, a bot that gets "Message from 🤖 …" is told to reply to that
+  bot with `message_agent`, but the reply it gives in its chat already goes back to the sender by itself (it is what
+  wakes the sender). So the sender got each answer twice, once as that wake-up and once as a new message, and ran one
+  short turn after another; its answer to the second one went back too and woke the first bot again. Now a
+  `message_agent` to the bot whose message started the turn is not sent: the bot is told its reply goes back on its own
+  and gives its answer there. Messages to other bots, and to that bot from any other turn (a wake-up, a routine, the
+  person), are sent as before. Only bots on this server are matched; a teammate on another machine is left alone.
 
 ## Install
 
-For the **default profile only**: the fixes apply to the whole Hermes process, so every bot it runs is covered.
+In the **default profile**: the fixes apply to the whole Hermes process, so every bot the dashboard and the messaging
+gateway run is covered.
 
 ```sh
 hermes plugins install Madd-Technologies/blobs-hermes-bot-plugins/hermes-bot-fixes --ref <commit sha> --force --enable
 ```
+
+A bot whose chat is not open in the dashboard answers another bot's message in a one-shot `hermes -p <bot> chat`, which
+loads only that bot's own plugins. For those answers to arrive once, give each bot that other bots message its own copy:
+the same command with `-p <bot>` after `hermes`. Copies in one process share the fixes and run one database guard.
 
 Then restart the dashboard and the messaging gateway.
 
@@ -53,4 +65,5 @@ python -m unittest discover -s hermes-bot-fixes/tests
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_hermes.py [path to a Hermes checkout]
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_compaction.py [path to a Hermes checkout]
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_handoff.py [path to a Hermes checkout]
+~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_dmreply.py [path to a Hermes checkout]
 ```
