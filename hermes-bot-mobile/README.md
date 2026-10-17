@@ -58,6 +58,70 @@ cannot:
 
 On SSH, Hermes copies the bot's skills and credential files to `~/.hermes` on that computer.
 
+## Restart from the app
+
+Since 0.1.6 the app can restart Hermes's dashboard (`hermes dashboard`, the server the app talks to) from a button, and
+the messaging gateway with it. It needs Linux with systemd 236 or later, and the dashboard running as a systemd service
+of its own (usually a `--user` unit such as `hermes-dashboard.service`).
+
+**Why it is not just `systemctl restart`.** Everything the dashboard starts runs in its unit's cgroup, and systemd stops
+every process in that cgroup when the unit stops: a `systemctl --user restart` run from inside would be killed halfway,
+which is also why asking a bot to restart the dashboard from its own shell fails. So the dashboard reads which unit it
+runs in from its own cgroup file under `/proc` (for example
+`/user.slice/user-1000.slice/user@1000.service/app.slice/hermes-dashboard.service`: a `--user` unit, since it sits under
+`user@<uid>.service`) and hands the restart to systemd, outside that cgroup:
+
+    systemd-run --user --collect --unit=hermes-bot-restart-<ts> --on-active=2 \
+      --timer-property=RemainAfterElapse=no --description="hermes-bot-mobile: restart <unit>" \
+      -- systemctl --user restart <unit>
+
+A transient timer fires two seconds later, after the app has its answer, and its transient service restarts the unit;
+systemd forgets both once they have run. Only this process's own unit is restarted: the request never names a unit or a
+command (a body with any other field is refused), the unit name must look like a plain systemd service name, and every
+command is an argv list, never a shell. `journalctl --user -u hermes-bot-restart-<ts>` shows what happened.
+
+**The gateway.** Hermes 0.21.5 already restarts the gateway with `POST /api/gateway/restart`; to restart only the
+gateway, call that. With `include_gateway`, this plugin restarts both, in this order:
+
+1. The gateway first, through Hermes's own `_spawn_gateway_restart`, the function behind that route, called in the
+   dashboard's process. That way it gets everything Hermes's button gets: `hermes gateway restart`'s graceful drain (the
+   gateway refuses new turns and lets running ones finish), joining a restart already in progress instead of starting a
+   second one, a system-scope gateway, a profile served by the shared gateway, and an entry in Hermes's own action log.
+   A Hermes without that function gets `hermes gateway restart` started the same way Hermes starts it (detached, not
+   interactive, without the `_HERMES_GATEWAY` marker that makes the CLI refuse).
+2. The dashboard, only once that has finished (at most 30 minutes). `hermes gateway restart` runs inside the
+   dashboard's cgroup and can wait minutes for the gateway's turns, so restarting the dashboard first, or at the same
+   time, would stop it partway, possibly after the gateway was asked to stop and before it was started again. A gateway
+   restart that fails still lets the dashboard restart; `last.gateway` says how it went.
+
+Chaining both commands in the transient unit instead would lose all of step 1: a unit started by `systemd-run --user`
+gets the user's systemd environment, not the dashboard's (Hermes's home, its Python, the profile), and Hermes's own
+restart button would not see it to join it.
+
+**Now or when idle.** `now` restarts right away. `idle` looks every 3 seconds at the chats this dashboard is running a
+turn for (Hermes's own list of live sessions, the one `session.active_list` reads; only read, never changed) and
+restarts once there are none, or gives up after `idle_timeout_s` (30 to 1800 s, default 600) and says how many were still
+busy. A chat waiting for your OK counts as busy. Only one restart waits at a time: a new request replaces it and
+`DELETE /restart` cancels it. Turns on chat platforms are the gateway's, and its own drain waits for them.
+
+**Limits.** One restart a minute: a request that restarted something, or is restarting it, holds the next one back for
+60 s, also across the restart (the log is on disk), and the answer is a 429 with `retry_after`. A request still waiting
+for idle restarted nothing, so it never holds anything back. A 409 says why the dashboard cannot be restarted from here,
+or that a restart is already under way.
+
+**Where it says no** (`supported: false`, and `why` in plain words): macOS (Hermes runs under launchd or in a terminal
+there), a container, a dashboard started from a terminal or a desktop session, another user's systemd, the messaging
+gateway inside the same unit (restarting it would skip the gateway's drain), a dashboard inside the gateway's process,
+a unit `systemctl` cannot reach, and a system unit unless the dashboard runs as root (restarting a system service needs
+root, and this plugin never asks for more rights than the dashboard has).
+
+**The log.** Each request, with when, how and what became of it, is kept in `restarts.json` (the last 20). A run of
+the same refusal is one row with a `count`, so a retry loop cannot push real restarts out. `last.outcome` is one of
+`waiting` (for the chats to finish), `restarting_gateway`, `scheduling`, `scheduled`, `done` (the dashboard answering is
+the restarted one: the process that asked is gone and this one started after), `not_restarted` (scheduled two minutes
+ago and the same process still answers), `cancelled`, `replaced`, `timed_out`, `failed` or `interrupted` (the
+dashboard stopped before the request was carried out).
+
 ## Routes
 
 Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
@@ -73,11 +137,15 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `GET /runs-on/key?profile=` | the bot's public SSH line (`null` before one is made) and its private key's path |
 | `POST /runs-on/key` | `{profile}`: makes the bot's key pair if it has none |
 | `POST /runs-on/check` | `{profile, backend: ssh\|docker, host, user, port, key}`: `{ok, system}` or `{ok: false, reason, detail}` |
+| `GET /restart` | read only: `{supported, why, unit, scope, pid, started_at, now, busy: [{id, session, title, profile, status}] \| null, gateway: {route, restart, same_unit}, last, retry_after}` |
+| `POST /restart` | `{when: now\|idle, idle_timeout_s: 30-1800 (600), include_gateway: false}`: 202 `{accepted, id, mode, unit, include_gateway}`; 409 `{detail}`, 429 `{detail, retry_after}` |
+| `DELETE /restart` | cancels the restart waiting for idle: `{cancelled: true, id}`; 404 when none waits, 409 once it is under way |
 
 ## Data
 
 `~/.hermes/hermes-bot-mobile/` (the Hermes root, not a profile: one phone, many bots): `devices.json`, `settings.json`,
-`vapid.json`, `presence.json` (all 0600) and `rooms/<room_id>.json`. On first start it copies `~/.hermes/hermes-push/`
+`vapid.json`, `presence.json`, `restarts.json` (all 0600) and `rooms/<room_id>.json`, plus `gateway-restart.log` when a
+Hermes without its own gateway spawner restarts the gateway. On first start it copies `~/.hermes/hermes-push/`
 there if this folder has none of its own files yet, so phones registered with `hermes-push` keep getting pushes. A bot's
 SSH key is in that bot's own home (see Where a bot runs).
 
@@ -87,4 +155,6 @@ SSH key is in that bot's own home (see Where a bot runs).
 
 `tests/relay_check.py <ntfy url>` checks that a push relay passes messages through byte for byte;
 `tests/integration_hermes.py` loads the plugin through a real Hermes plugin manager, and with Hermes 0.21.5+ blocks a real
-kanban card and checks its push.
+kanban card and checks its push. The unit tests fake systemd; `tests/integration_restart.py` is the end-to-end check of
+restarting on a Linux server: it restarts a throwaway transient unit of its own (never Hermes) and lists the checks to
+make on the real dashboard.

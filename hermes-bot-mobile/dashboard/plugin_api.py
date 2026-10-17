@@ -1,5 +1,6 @@
 """The phone app's side of hermes-bot-mobile: register a device, change how loud each bot is, send a test, read what
-each bot in a group room is doing right now, and set up where a bot's commands run (its SSH key and a connection check).
+each bot in a group room is doing right now, set up where a bot's commands run (its SSH key and a connection check), and
+restart this dashboard (and the gateway) from the app.
 
 Mounted by `hermes serve` under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's own sign-in, so only someone
 who can already use the server can reach it. Hermes imports this file on its own, apart from the plugin package,
@@ -11,12 +12,15 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 _PACKAGE = "_hermes_bot_mobile_package"
 
@@ -53,6 +57,34 @@ def _runs_on():
     _package()
 
     return importlib.import_module(f"{_PACKAGE}.runs_on")
+
+
+def _restart():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.restart")
+
+
+#: The one restarter of this dashboard process: a restart waiting for the chats to finish lives in it.
+_RESTARTER = None
+_RESTARTER_LOCK = threading.Lock()
+
+
+def _restarter():
+    global _RESTARTER
+
+    with _RESTARTER_LOCK:
+        if _RESTARTER is None:
+            _RESTARTER = _restart().Restarter()
+
+        return _RESTARTER
+
+
+def _refusal(refusal) -> JSONResponse:
+    content = {"detail": refusal.detail, **refusal.extra}
+    headers = {"Retry-After": str(refusal.extra["retry_after"])} if "retry_after" in refusal.extra else None
+
+    return JSONResponse(status_code=refusal.status, content=content, headers=headers)
 
 
 def _profile_home(profile: str) -> Path:
@@ -130,6 +162,17 @@ class PresenceIn(BaseModel):
     #: The sessions of the chat or room on screen (live and stored ids both fine).
     sessions: list[str] = []
     ttl: float = 45.0
+
+
+class RestartIn(BaseModel):
+    # Anything else (a unit, a command) is refused: only this dashboard's own unit and Hermes's gateway restart run.
+    model_config = {"extra": "forbid"}
+
+    #: "now", or "idle": once no chat is running a turn, or not at all after `idle_timeout_s`.
+    when: Literal["now", "idle"]
+    idle_timeout_s: int = Field(600, ge=30, le=1800)
+    #: Restart the messaging gateway too (first, through Hermes's own gateway restart).
+    include_gateway: bool = False
 
 
 def _public(row: dict) -> dict:
@@ -272,3 +315,40 @@ def check_runs_on(body: CheckIn) -> dict:
         return runs_on.check_ssh(body.host, body.user, body.port, body.key)
     except runs_on.Invalid as failure:
         raise HTTPException(status_code=422, detail=str(failure))
+
+
+@router.get("/restart")
+def restart_status() -> dict:
+    """Whether this dashboard can be restarted from the app, and what a restart would cut short. Read only.
+
+    `{supported, why, unit, scope, pid, started_at, now, busy, gateway: {route, restart, same_unit}, last, retry_after}`:
+    `unit` is this process's own systemd unit and `scope` is `user` or `system`; `busy` lists the chats running a turn
+    (`[{id, session, title, profile, status}]`, or null when they cannot be seen); `gateway.route` says Hermes serves
+    `POST /api/gateway/restart`; `last` is the last request and what became of it (`done` once this dashboard is the
+    restarted one)."""
+    return _restarter().status()
+
+
+@router.post("/restart", status_code=202)
+def restart(body: RestartIn):
+    """Restart this dashboard: `{when: now|idle, idle_timeout_s, include_gateway}` -> 202 `{accepted, id, mode, unit,
+    include_gateway}`. 409 when it cannot be restarted from here or a restart is under way, 429 with `retry_after`
+    within a minute of the last restart."""
+    restart_module = _restart()
+
+    try:
+        return _restarter().request(body.when, body.idle_timeout_s, body.include_gateway)
+    except restart_module.Refused as refusal:
+        return _refusal(refusal)
+
+
+@router.delete("/restart")
+def cancel_restart():
+    """Cancel the restart waiting for the chats to finish: `{cancelled: true, id}`; 404 when none waits, 409 once it is
+    under way."""
+    restart_module = _restart()
+
+    try:
+        return _restarter().cancel()
+    except restart_module.Refused as refusal:
+        return _refusal(refusal)
