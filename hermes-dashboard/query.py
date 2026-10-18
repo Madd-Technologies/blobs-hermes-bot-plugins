@@ -467,11 +467,15 @@ def clean_view_config(kind: str, raw, fields: list[dict] | None) -> dict:
     config: dict = {}
     config["filter"] = clean_filter(raw.get("filter"), fields)
     config["needs_you"] = clean_filter(raw.get("needs_you"), fields)
-    config["signals"] = clean_signals(raw.get("signals"), fields)
 
     if kind in ("list", "checklist", "board", "table"):
+        # Only rows carry a signal; a number or chart drops the key like any other it doesn't use.
+        config["signals"] = clean_signals(raw.get("signals"), fields)
         config["sort"] = clean_sort(raw.get("sort"), fields)
         config["limit"] = max(1, min(int(raw.get("limit") or 50), MAX_ROWS))
+
+    if kind in ("list", "checklist", "table"):
+        # A board keeps done records for closed_within_days instead.
         config["include_closed"] = bool(raw.get("include_closed"))
 
     if kind in ("list", "checklist", "board"):
@@ -638,6 +642,17 @@ def _muted_last(records: list[dict], now: float) -> list[dict]:
     return [record for record in records if not muted(record, now)] + [record for record in records if muted(record, now)]
 
 
+def _unit(config: dict, fields: list[dict]) -> dict | None:
+    """What a number or chart adds up, so the app can draw $1,240 or 96%: its aggregate field's type (none for a count)."""
+    key = (config.get("aggregate") or {}).get("field")
+    field = next((field for field in fields if field["key"] == key), None) if key else None
+
+    if not field:
+        return None
+
+    return {"type": field["type"], **({"currency": field.get("currency", "USD")} if field["type"] == "money" else {})}
+
+
 def compute_view(view: dict, fields: list[dict] | None, records: list[dict], now: float) -> dict:
     """What the app draws for one view: rows, columns, a figure or a series, plus its counts."""
     kind, config = view["kind"], view.get("config") or {}
@@ -654,6 +669,9 @@ def compute_view(view: dict, fields: list[dict] | None, records: list[dict], now
     open_ = [record for record in chosen if not record.get("closed_at")]
     flagged = [record for record in open_ if needs_you(record, config, fields, now)]
     result.update({"open": len(open_), "needs_you": len(flagged)})
+
+    if kind in ("number", "chart") and (unit := _unit(config, fields)):
+        result["unit"] = unit
 
     if kind in ("list", "checklist", "table"):
         shown = chosen if config.get("include_closed") else open_
