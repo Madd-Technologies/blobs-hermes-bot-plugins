@@ -42,7 +42,7 @@ panels yourself: the bot does, and reshapes them when you ask.
 | --- | --- |
 | `GET /status` | version, schema, how many dashboards |
 | `GET /bots` | per dashboard: open records that need you (each once), views, last change |
-| `GET /bots/{profile}` | that dashboard's views, computed, their collections' fields, how each is kept, and a version; `?since=<version>` answers `unchanged` without computing; `?fresh=1` reads live sources now |
+| `GET /bots/{profile}` | that dashboard's views, computed (a number or chart that adds up a field also says its `unit`, so money and percent figures read `$1,240` and `96%`), their collections' fields, how each is kept, and a version; `?since=<version>` answers `unchanged` without computing; `?fresh=1` reads live sources now |
 | `GET /bots/{profile}/needs-you` | the records on it that need you |
 | `GET /records/{id}` | a record, its collection, its history and notes, how to head it, its buttons and any job under way |
 | `PATCH /records/{id}` | `{"values": {...}}` changed by you |
@@ -56,7 +56,9 @@ choice, phone, email, url, link, rating, draft (text the bot wrote for you to se
 matches; the app opens a side chat with the bot and sends it the job and the record, and the record waits on the bot
 (no amber) until the bot writes it, or 30 minutes pass. The bot acts only then, with Hermes's approvals as usual.
 **Panel kinds:** list, checklist, board (by a status or choice), table, number
-(with the previous period), chart (per day, week or month), summary, stat. Filters are a small structured language
+(with the previous period), chart (per day, week or month), summary, stat. Row signals are for list, checklist, board and
+table; `include_closed` for list, checklist and table (a board keeps done records for `closed_within_days`). A kind drops
+keys it doesn't use. Filters are a small structured language
 (`{field, op, value}`, `all`/`any`/`not`), never SQL. **Your edits win**: a field you changed is left alone by later bot
 writes unless the bot overrides it on purpose.
 

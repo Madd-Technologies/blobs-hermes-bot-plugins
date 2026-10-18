@@ -145,6 +145,19 @@ class Views(unittest.TestCase):
             Q.clean_view_config("list", {"show": {"title": "customer"}, "signals": [{"when": {"op": "is_open"}, "tone": "good"}] * 9}, FIELDS)
         self.assertEqual(Q.clean_view_config("list", {"show": {"title": "customer"}}, FIELDS)["signals"], [])
 
+    def test_a_number_or_chart_says_what_it_adds_up(self):
+        money = Q.compute_view(self.view("number", {"aggregate": {"op": "sum", "field": "quote"}}), FIELDS, RECORDS, NOW)
+        self.assertEqual(money["unit"], {"type": "money", "currency": "USD"})
+        chart = Q.compute_view(self.view("chart", {"aggregate": {"op": "avg", "field": "units"}, "field": "received"}), FIELDS, RECORDS, NOW)
+        self.assertEqual(chart["unit"], {"type": "number"})
+        self.assertNotIn("unit", Q.compute_view(self.view("number", {"aggregate": "count"}), FIELDS, RECORDS, NOW))
+
+    def test_keys_a_kind_does_not_use_are_dropped(self):
+        rule = [{"when": {"op": "is_open"}, "tone": "good"}]
+        self.assertNotIn("signals", Q.clean_view_config("number", {"signals": rule}, FIELDS))
+        self.assertNotIn("signals", Q.clean_view_config("chart", {"signals": rule, "field": "received"}, FIELDS))
+        self.assertNotIn("include_closed", Q.clean_view_config("board", {"group_by": "status", "show": {"title": "customer"}, "include_closed": True}, FIELDS))
+        self.assertEqual(Q.clean_view_config("table", {"columns": ["customer"], "include_closed": True, "signals": rule}, FIELDS)["include_closed"], True)
 
     def test_a_board_groups_by_stage_and_keeps_recently_closed(self):
         result = Q.compute_view(self.view("board", {"group_by": "status", "show": {"title": "customer"}}), FIELDS, RECORDS, NOW)
