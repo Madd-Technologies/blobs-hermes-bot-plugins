@@ -42,6 +42,7 @@ KEEP_BACKUPS = 3
 KEEP_EVENTS = 50
 INTERVAL_SECONDS = 600
 FIRST_SCAN_DELAY = 30
+THREAD = "hermes-bot-fixes-dbguard"
 
 
 def damaged(head: bytes) -> bool:
@@ -224,7 +225,9 @@ def start(root: Path | None = None, interval: float = INTERVAL_SECONDS, delay: f
     global _started
 
     with _start_lock:
-        if _started:
+        # A process that loads a copy of this plugin for each bot imports this module once per copy; the guard's thread
+        # is what tells the other copies it is already running.
+        if _started or any(thread.name == THREAD and thread.is_alive() for thread in threading.enumerate()):
             return False
 
         _started = True
@@ -242,6 +245,6 @@ def start(root: Path | None = None, interval: float = INTERVAL_SECONDS, delay: f
 
             time.sleep(interval)
 
-    threading.Thread(target=loop, name="hermes-bot-fixes-dbguard", daemon=True).start()
+    threading.Thread(target=loop, name=THREAD, daemon=True).start()
 
     return True

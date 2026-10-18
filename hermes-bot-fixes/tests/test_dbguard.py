@@ -157,5 +157,26 @@ class Guard(unittest.TestCase):
         self.assertEqual(len(list((self.state / "backups").glob("shared-state.db.*.corrupt"))), dbguard.KEEP_BACKUPS)
 
 
+class StartTest(unittest.TestCase):
+    def test_one_guard_per_process_across_copies(self):
+        """A process that loads a copy of the plugin for each bot imports this module once per copy; one guard runs."""
+        import importlib.util
+        import threading
+
+        spec = importlib.util.spec_from_file_location("dbguard_second_copy", ROOT / "dbguard.py")
+        second = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(second)
+        root = Path(tempfile.mkdtemp())
+
+        try:
+            self.assertTrue(dbguard.start(root, interval=3600, delay=3600))
+            self.assertFalse(dbguard.start(root, interval=3600, delay=3600))
+            self.assertFalse(second.start(root, interval=3600, delay=3600))
+        finally:
+            dbguard._started = False
+
+        self.assertEqual(sum(thread.name == dbguard.THREAD for thread in threading.enumerate()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

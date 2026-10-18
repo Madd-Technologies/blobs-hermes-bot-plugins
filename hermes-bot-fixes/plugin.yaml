@@ -1,6 +1,6 @@
 name: hermes-bot-fixes
-version: 0.3.0
-description: Local fixes for Hermes 0.21.x on a Bot Screen host - screenshots skip desktop panels and wait for the screen to settle, a guard repairs SQLite files whose header was overwritten by a stray TLS record, compaction no longer hands a bot back a request it already answered before a background result woke it, and a background task that comes back unfinished is handed to a new background worker (a kanban card for the bot itself) instead of being finished in the chat.
+version: 0.4.0
+description: Local fixes for Hermes 0.21.x on a Bot Screen host - screenshots skip desktop panels and wait for the screen to settle, a guard repairs SQLite files whose header was overwritten by a stray TLS record, compaction no longer hands a bot back a request it already answered before a background result woke it, a background task that comes back unfinished is handed to a new background worker (a kanban card for the bot itself) instead of being finished in the chat, and a bot answering a teammate's message answers once, in its reply, instead of also sending the answer back with message_agent.
 author: Madd Technologies
 kind: standalone
 provides_hooks:
