@@ -42,6 +42,23 @@ and logged), so a newer Hermes that changed it simply goes unpatched.
   `message_agent` to the bot whose message started the turn is not sent: the bot is told its reply goes back on its own
   and gives its answer there. Messages to other bots, and to that bot from any other turn (a wake-up, a routine, the
   person), are sent as before. Only bots on this server are matched; a teammate on another machine is left alone.
+- **Other bots' messages run in the main chat.** Hermes runs every `message_agent` from a bot on this server as a turn in
+  the recipient's main chat ("Bot Chat"): the chat shows the bot working, your own message waits behind that turn or is
+  mixed into it, and the exchange between the bots sits in the chat you talk to the bot in. Now it runs as one turn in
+  the recipient's **inbox**, a chat of its own titled **"Bot Inbox"** (made on first use, and continued as
+  "Bot Inbox #2" and so on after Hermes compresses it). The recipient answers there, and its answer goes back to the
+  bot that asked, as before, as the wake-up in the chat that sent the message. The main chat gets no rows and never
+  runs, whether or not it is open. Messages from several bots at once queue on the recipient's turn lock, the same lock
+  Hermes's own deliveries and rooms use (`bot_mode.turn_wait_seconds`, then the sender hears that the bot was busy).
+  - The inbox is its own conversation: it doesn't share the main chat's history, and a bot can't message other bots
+    from it (that needs its main chat), so two bots can't bounce answers back and forth.
+  - It runs like `hermes chat -Q`: a dangerous command follows `approvals.single_query_mode` (deny by default) and
+    nothing waits for a person.
+  - The sender's main chat still runs one short turn when an answer to its own message comes back: that is the bot
+    telling you what the other bot said.
+  - Unchanged: messages from bots on other machines (peers, relay, another connection), routines and Kanban.
+  - To switch it off (say, once Hermes itself does this), put `HERMES_BOT_FIXES_BOT_INBOX=off` in `~/.hermes/.env` and
+    restart the dashboard and the messaging gateway; messages then run in the main chat exactly as Hermes runs them.
 
 ## Install
 
@@ -52,9 +69,10 @@ gateway run is covered.
 hermes plugins install Madd-Technologies/blobs-hermes-bot-plugins/hermes-bot-fixes --ref <commit sha> --force --enable
 ```
 
-A bot whose chat is not open in the dashboard answers another bot's message in a one-shot `hermes -p <bot> chat`, which
-loads only that bot's own plugins. For those answers to arrive once, give each bot that other bots message its own copy:
-the same command with `-p <bot>` after `hermes`. Copies in one process share the fixes and run one database guard.
+A bot's turns that run outside the dashboard and the gateway, in a one-shot `hermes -p <bot> chat`, load only that
+bot's own plugins, so give each bot its own copy too: the same command with `-p <bot>` after `hermes`. Copies in one
+process share the fixes and run one database guard. The inbox is decided where `message_agent` runs, in the sender's
+process: the dashboard for a bot whose main chat is open there.
 
 Then restart the dashboard and the messaging gateway.
 
@@ -66,4 +84,5 @@ python -m unittest discover -s hermes-bot-fixes/tests
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_compaction.py [path to a Hermes checkout]
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_handoff.py [path to a Hermes checkout]
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_dmreply.py [path to a Hermes checkout]
+~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_inbox.py [path to a Hermes checkout]
 ```

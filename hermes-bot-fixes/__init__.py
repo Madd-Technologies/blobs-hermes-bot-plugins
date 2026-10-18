@@ -9,11 +9,13 @@
   delegate_task), not finished by the bot in the chat the person talks to it in (`handoff.py`).
 - A bot answering a teammate's message answers in its reply only, not also with message_agent back to that teammate
   (`dmreply.py`).
+- A teammate's message runs in the recipient's inbox chat ("Bot Inbox"), never in its main chat (`inbox.py`, which hands
+  the turn to `inbox_turn.py`; `HERMES_BOT_FIXES_BOT_INBOX=off` switches it off).
 
 The fixes apply to the whole process, so the default profile's copy covers every bot that the dashboard and the messaging
-gateway run. A bot whose chat is not open there answers a teammate in a one-shot `hermes -p <bot> chat`, which loads only
-that bot's own plugins, so each bot that teammates message needs its own copy too; copies in one process share the fixes
-and run one database guard.
+gateway run. A turn outside them, in a one-shot `hermes -p <bot> chat`, loads only that bot's own plugins, so each bot
+needs its own copy for those turns; copies in one process share the fixes and run one database guard. The inbox is
+decided where message_agent runs: in the sender's process.
 Nothing here edits Hermes's own files; each fix checks that the code it wraps is the one it expects.
 """
 
@@ -25,12 +27,13 @@ log = logging.getLogger("hermes-bot-fixes")
 
 
 def register(ctx) -> None:
-    from . import capture, compaction, dbguard, dmreply, handoff
+    from . import capture, compaction, dbguard, dmreply, handoff, inbox
 
     applied = capture.apply()
     restatement = compaction.apply()
     handing_off = handoff.apply()
     reply_once = dmreply.apply()
+    inboxed = inbox.apply()
 
     def on_tool(**kw):
         # computer_use may only be importable once a turn first uses it; apply what is still missing then.
@@ -42,4 +45,4 @@ def register(ctx) -> None:
 
     ctx.register_hook("pre_tool_call", on_tool)
     started = dbguard.start()
-    log.info("hermes-bot-fixes: panels %s, settle %s, compaction %s, hand-off %s, reply once %s, database guard %s", applied["panels"], applied["settle"], restatement, handing_off, reply_once, "started" if started else "already running")
+    log.info("hermes-bot-fixes: panels %s, settle %s, compaction %s, hand-off %s, reply once %s, bot inbox %s, database guard %s", applied["panels"], applied["settle"], restatement, handing_off, reply_once, ("on" if inbox.enabled() else "off") if inboxed else False, "started" if started else "already running")
