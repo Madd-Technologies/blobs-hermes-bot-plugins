@@ -65,7 +65,7 @@ class Watch(unittest.TestCase):
         self.watch = needs_you.NeedsYou(
             requests=lambda: self.hermes,
             broadcast=broadcast,
-            session_of=lambda sid: {"profile": {"s-leto": "default", "s-hydra": "hydra"}.get(sid, ""), "session_key": f"stored-{sid}", "title": "Bot Chat"},
+            session_of=lambda sid: {"profile": {"s-orion": "default", "s-juniper": "juniper"}.get(sid, ""), "session_key": f"stored-{sid}", "title": "Bot Chat"},
             coalesce_s=0.01,
         )
 
@@ -77,7 +77,7 @@ class Watch(unittest.TestCase):
 
     def test_pushes_a_prompt_the_moment_it_opens_and_again_when_it_closes(self):
         self.assertTrue(self.watch.install())
-        asked = self.hermes.open(Request("s-hydra", "approval", {"command": "rm -r <redacted>", "description": "delete files", "choices": ["once", "deny"]}))
+        asked = self.hermes.open(Request("s-juniper", "approval", {"command": "rm -r <redacted>", "description": "delete files", "choices": ["once", "deny"]}))
         opened = self.wait_for(1)
         self.assertEqual(
             opened["requests"],
@@ -85,9 +85,9 @@ class Watch(unittest.TestCase):
                 {
                     "id": asked.id,
                     "method": "approval",
-                    "session_id": "s-hydra",
-                    "session_key": "stored-s-hydra",
-                    "profile": "hydra",
+                    "session_id": "s-juniper",
+                    "session_key": "stored-s-juniper",
+                    "profile": "juniper",
                     "title": "Bot Chat",
                     "created_at": asked.created_at,
                     "params": {"command": "rm -r <redacted>", "description": "delete files", "choices": ["once", "deny"]},
@@ -103,8 +103,8 @@ class Watch(unittest.TestCase):
 
     def test_leaves_out_what_the_agent_asks_the_client_rather_than_you(self):
         self.watch.install()
-        self.hermes.open(Request("s-leto", "terminal.read"))
-        self.hermes.open(Request("s-leto", "clarify", {"questions": [{"id": "q1", "question": "Which one?"}]}))
+        self.hermes.open(Request("s-orion", "terminal.read"))
+        self.hermes.open(Request("s-orion", "clarify", {"questions": [{"id": "q1", "question": "Which one?"}]}))
         pushed = self.wait_for(1)
         self.assertEqual([entry["method"] for entry in pushed["requests"]], ["clarify"])
 
@@ -112,14 +112,14 @@ class Watch(unittest.TestCase):
         self.watch = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=self.sent.append, session_of=lambda sid: {}, coalesce_s=0.2)
         self.watch.install()
         for n in range(3):
-            self.hermes.open(Request("s-leto", "clarify", {"questions": [{"id": f"q{n}"}]}))
+            self.hermes.open(Request("s-orion", "clarify", {"questions": [{"id": f"q{n}"}]}))
         time.sleep(0.6)
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(len(self.sent[0]["requests"]), 3)
 
     def test_a_question_in_a_batch_answered_is_a_change(self):
         self.watch.install()
-        batch = self.hermes.open(Request("s-leto", "clarify", {"questions": [{"id": "q1"}, {"id": "q2"}]}))
+        batch = self.hermes.open(Request("s-orion", "clarify", {"questions": [{"id": "q1"}, {"id": "q2"}]}))
         self.wait_for(1)
         with self.hermes._lock:
             batch.locked["q1"] = "Yes"
@@ -134,14 +134,14 @@ class Watch(unittest.TestCase):
         self.assertFalse(self.watch.publish())
 
     def test_prompts_already_open_are_kept_and_pushed_at_install(self):
-        early = self.hermes.open(Request("s-leto", "sudo"))
+        early = self.hermes.open(Request("s-orion", "sudo"))
         self.watch.install()
         self.assertEqual(self.wait_for(1)["requests"][0]["id"], early.id)
         self.assertIn(early.id, self.hermes._open)
 
     def test_a_read_for_the_route_never_hides_a_change_from_the_push(self):
         self.watch.install()
-        asked = self.hermes.open(Request("s-leto", "secret", {"prompt": "API key", "env_var": "X_KEY"}))
+        asked = self.hermes.open(Request("s-orion", "secret", {"prompt": "API key", "env_var": "X_KEY"}))
         self.assertEqual(self.watch.snapshot()["requests"][0]["id"], asked.id)
         self.assertEqual(self.wait_for(1)["requests"][0]["id"], asked.id)
 
@@ -175,7 +175,7 @@ class Watch(unittest.TestCase):
 
         watch = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=flaky, session_of=lambda sid: {}, coalesce_s=0.01)
         watch.install()
-        first = self.hermes.open(Request("s-leto", "approval"))
+        first = self.hermes.open(Request("s-orion", "approval"))
         time.sleep(0.1)
         self.hermes.close(first)
         time.sleep(0.1)
