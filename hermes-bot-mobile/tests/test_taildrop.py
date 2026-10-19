@@ -365,7 +365,7 @@ class Sending(Base):
     def test_the_target_must_be_one_taildrop_offers(self):
         sender = self.sender()
 
-        for target in ["", "printer", "100.101.102.199", "pixel-9; id", "pixel-9:"]:
+        for target in ["", "printer", "100.64.0.99", "pixel-9; id", "pixel-9:"]:
             self.refused(lambda: sender.send(target, source=self.checked(sender)), 422)
 
         self.assertEqual(self.system.started, [])
@@ -440,7 +440,7 @@ class Sending(Base):
 
 
 class Limits(Base):
-    FOUR = TARGETS + "100.101.102.105\ttablet\n"
+    FOUR = TARGETS + "100.64.0.15\ttablet\n"
 
     def test_one_per_device_and_three_at_once(self):
         sender = self.sender(deferred=True, targets=self.FOUR)
