@@ -502,3 +502,46 @@ class LoadedLikeHermes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BotName(unittest.TestCase):
+    """A bot's name in a push, read from its own profile.yaml the way Hermes reads YAML."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.dir.name)
+        (self.root / "profiles" / "juniper").mkdir(parents=True)
+        (self.root / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    title: Orion\n", encoding="utf-8")
+        (self.root / "profiles" / "juniper" / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    title: Juniper Bot\n", encoding="utf-8")
+        constants = type(sys)("hermes_constants")
+        constants.get_default_hermes_root = lambda: self.root
+        self.modules = {"hermes_constants": constants}
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_reads_through_hermes_yaml_on_a_hermes_without_pyyaml(self):
+        import yaml as pyyaml
+
+        reads = []
+        hermes_yaml = type(sys)("hermes_yaml")
+        hermes_yaml.safe_load = lambda text: reads.append(text) or pyyaml.safe_load(text)
+        # Hermes 0.21.6: its own hermes_yaml (ruamel), and no PyYAML to import.
+        with mock.patch.dict(sys.modules, {**self.modules, "hermes_yaml": hermes_yaml, "yaml": None}):
+            self.assertEqual(hooks.bot_name("default"), "Orion")
+            self.assertEqual(hooks.bot_name("juniper"), "Juniper Bot")
+        self.assertEqual(len(reads), 2)
+
+    def test_reads_the_named_bots_own_folder_not_the_callers(self):
+        with mock.patch.dict(sys.modules, {**self.modules, "hermes_yaml": None}):
+            self.assertEqual(hooks.bot_name("juniper"), "Juniper Bot", "a card assigned to another bot is named after that bot")
+
+    def test_falls_back_to_pyyaml_on_an_older_hermes(self):
+        with mock.patch.dict(sys.modules, {**self.modules, "hermes_yaml": None}):
+            self.assertEqual(hooks.bot_name("default"), "Orion")
+
+    def test_a_bot_without_a_title_keeps_its_plain_name(self):
+        with mock.patch.dict(sys.modules, {**self.modules, "hermes_yaml": None}):
+            self.assertEqual(hooks.bot_name("harbor-watch"), "Harbor Watch")
+            (self.root / "profile.yaml").write_text("description: no title\n", encoding="utf-8")
+            self.assertEqual(hooks.bot_name("default"), "Hermes")

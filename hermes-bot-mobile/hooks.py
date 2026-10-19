@@ -134,13 +134,33 @@ def current_profile() -> str:
     return named.name if named else "default"
 
 
+def yaml_module():
+    """Hermes's YAML reader. Hermes 0.21.6 reads YAML through its own `hermes_yaml` (ruamel) and no longer ships PyYAML,
+    so a bare `import yaml` fails there; older Hermes has only PyYAML."""
+    try:
+        import hermes_yaml
+
+        return hermes_yaml
+    except ImportError:
+        import yaml
+
+        return yaml
+
+
+def bot_home(profile: str) -> Path:
+    """The named bot's own folder: the Hermes root for `default`, `profiles/<name>` under it for the others. Not the
+    calling process's home: a blocked kanban card is pushed from whichever process ran the hook, for its assignee."""
+    from hermes_constants import get_default_hermes_root
+
+    root = Path(get_default_hermes_root())
+
+    return root if profile == "default" else root / "profiles" / profile
+
+
 def bot_name(profile: str) -> str:
     """The bot's own name as the app shows it: its `ui_meta` title, else "Hermes" / the title-cased profile name."""
     try:
-        import yaml
-        from hermes_constants import get_hermes_home
-
-        data = yaml.safe_load(Path(get_hermes_home(), "profile.yaml").read_text(encoding="utf-8")) or {}
+        data = yaml_module().safe_load((bot_home(profile) / "profile.yaml").read_text(encoding="utf-8-sig")) or {}
         title = ((data.get("ui_meta") or {}).get("hermes-bots") or {}).get("title")
 
         if isinstance(title, str) and title.strip():
