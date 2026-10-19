@@ -1,6 +1,6 @@
 name: hermes-bot-mobile
-version: 0.1.5
-description: The HermesBot phone app's companion on this server - push notifications when a bot needs you (approvals, questions, broken routines, blocked kanban cards) or answers you, live activity of bots in group rooms, and setting up a bot to run its commands on another computer.
+version: 0.1.7
+description: The HermesBot phone app's companion on this server - push notifications when a bot needs you (approvals, questions, broken routines, blocked kanban cards) or answers you, live activity of bots in group rooms, setting up a bot to run its commands on another computer, restarting the Hermes dashboard (and the gateway) from the app, Taildropping a file from the server to one of your devices, pushing Needs you to the app the moment a prompt opens or closes, and pushes for other plugins' phone calls (hermes-phone).
 author: Madd Technologies
 kind: standalone
 provides_hooks:

@@ -10,6 +10,7 @@ when the app asks; a source that fails keeps showing its last good rows, marked 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -20,6 +21,8 @@ import time
 import urllib.request
 from datetime import date, datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger("hermes-dashboard")
 
 KINDS = ("sqlite", "json", "ics", "script")
 MAX_ROWS = 200
@@ -45,6 +48,24 @@ def bot_home(root: Path, profile: str) -> Path:
     return root if profile == "default" else root / "profiles" / profile
 
 
+def yaml_module():
+    """Hermes's YAML reader. Hermes 0.21.6 reads YAML through its own `hermes_yaml` (ruamel) and no longer ships PyYAML,
+    so a bare `import yaml` fails there; older Hermes has only PyYAML."""
+    try:
+        import hermes_yaml
+
+        return hermes_yaml
+    except ImportError:
+        import yaml
+
+        return yaml
+
+
+#: Bots whose config could not be read, warned about once each: a silent None here once kept every bot's Background work
+#: (and its blocked cards) off its dashboard.
+_UNREADABLE: set[str] = set()
+
+
 def plugin_installed(root: Path, profile: str) -> bool | None:
     """Whether this bot has the dashboard plugin (Hermes loads plugins per profile): its folder in the bot's plugins and the
     bot's own `plugins.enabled` naming it. None for a bot that doesn't exist, or a config that can't be read."""
@@ -57,12 +78,14 @@ def plugin_installed(root: Path, profile: str) -> bool | None:
         return False
 
     try:
-        import yaml
-
-        config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
+        config = yaml_module().safe_load((home / "config.yaml").read_text(encoding="utf-8-sig")) or {}
     except FileNotFoundError:
         return False
-    except Exception:
+    except Exception as error:
+        if profile not in _UNREADABLE:
+            _UNREADABLE.add(profile)
+            log.warning("hermes-dashboard: can't read %s's config.yaml to tell whether it has this plugin (%s)", profile, type(error).__name__)
+
         return None
 
     enabled = (config.get("plugins") or {}).get("enabled") if isinstance(config, dict) else None

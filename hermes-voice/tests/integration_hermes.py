@@ -83,7 +83,7 @@ client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
 
 status = client.get("/api/plugins/hermes-voice/status")
 print("status:", status.status_code, status.json())
-assert status.json()["version"] == "0.1.0"
+assert status.json()["version"] == "0.1.1"
 
 bot = client.get("/api/plugins/hermes-voice/bot", params={"profile": "default"}).json()
 print("default:", bot)

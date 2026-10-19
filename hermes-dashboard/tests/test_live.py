@@ -79,6 +79,30 @@ class Installed(Root):
     def test_a_bot_that_does_not_exist_cannot_be_told(self):
         self.assertIsNone(L.plugin_installed(self.root, "nobody"))
 
+    def test_reads_the_config_through_hermes_yaml_on_a_hermes_without_pyyaml(self):
+        import yaml as pyyaml
+
+        reads = []
+        hermes_yaml = type(sys)("hermes_yaml")
+        hermes_yaml.safe_load = lambda text: reads.append(1) or pyyaml.safe_load(text)
+        (self.home / "plugins" / "hermes-dashboard").mkdir(parents=True)
+        self.enable(self.home, ["hermes-dashboard"])
+        # Hermes 0.21.6: its own hermes_yaml (ruamel), and no PyYAML to import. Before, every bot read as None here, so
+        # no blocked kanban card reached a dashboard.
+        with mock.patch.dict(sys.modules, {"hermes_yaml": hermes_yaml, "yaml": None}):
+            self.assertIs(L.plugin_installed(self.root, "concierge"), True)
+        self.assertEqual(reads, [1])
+
+    def test_an_unreadable_config_is_warned_about_once(self):
+        (self.home / "plugins" / "hermes-dashboard").mkdir(parents=True)
+        (self.home / "config.yaml").write_text("plugins: [unclosed\n", encoding="utf-8")
+        L._UNREADABLE.discard("concierge")
+        with self.assertLogs("hermes-dashboard", level="WARNING") as logged:
+            self.assertIsNone(L.plugin_installed(self.root, "concierge"))
+            self.assertIsNone(L.plugin_installed(self.root, "concierge"))
+        self.assertEqual(len(logged.records), 1)
+        self.assertIn("concierge", logged.output[0])
+
 
 class LiveSources(Root):
     def test_a_sqlite_file_the_bot_keeps_is_a_live_table(self):

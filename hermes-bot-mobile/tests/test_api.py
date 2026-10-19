@@ -113,6 +113,15 @@ class Api(unittest.TestCase):
         message = json.loads(self.phone.read(content))
         self.assertEqual((message["title"], message["body"], message["url"]), ("Hermes", "Notifications are working", "hermesbot://inbox"))
 
+    def test_needs_you_says_when_this_server_cannot_push_it(self):
+        def no_table():
+            raise ImportError("No module named 'tui_gateway.server_requests'")
+
+        # A Hermes without the open-requests table: the app is told to keep its own check.
+        self.module._NEEDS_YOU = self.module._needs_you_module().NeedsYou(requests=no_table)
+        body = self.client.get(f"{self.base}/needs-you").json()
+        self.assertEqual(body, {"live": False, "version": 0, "requests": []})
+
     def test_testing_an_unknown_device_is_a_404(self):
         self.assertEqual(self.client.post(f"{self.base}/test", json={"device": "nope"}).status_code, 404)
 

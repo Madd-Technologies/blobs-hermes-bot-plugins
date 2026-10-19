@@ -1,0 +1,15 @@
+# hermes-phone's call service, as a systemd user unit. Copy to ~/.config/systemd/user/, fix the two paths, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now hermes-phone.service
+# The interpreter must be the one Hermes runs on (it imports Hermes's sign-in helper and Bot Chat delivery).
+[Unit]
+Description=hermes-phone call service (Twilio <-> Grok voice)
+After=network-online.target
+
+[Service]
+ExecStart=/path/to/hermes/python %h/.hermes/plugins/hermes-phone/run.py
+Restart=on-failure
+RestartSec=5
+# Binds 127.0.0.1 only; expose it with Tailscale Funnel (or another tunnel) on the port in settings (default 8796).
+
+[Install]
+WantedBy=default.target

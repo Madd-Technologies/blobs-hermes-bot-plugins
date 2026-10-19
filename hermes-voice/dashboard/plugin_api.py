@@ -55,11 +55,22 @@ def _store():
     return _core().Store(root() / "hermes-voice")
 
 
-def _version() -> str:
+def _yaml():
+    """Hermes's YAML reader. Hermes 0.21.6 reads YAML through its own `hermes_yaml` (ruamel) and no longer ships PyYAML,
+    so a bare `import yaml` fails there; older Hermes has only PyYAML."""
     try:
+        import hermes_yaml
+
+        return hermes_yaml
+    except ImportError:
         import yaml
 
-        manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8")) or {}
+        return yaml
+
+
+def _version() -> str:
+    try:
+        manifest = _yaml().safe_load((Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8-sig")) or {}
         return str(manifest.get("version") or "")
     except Exception:
         return ""

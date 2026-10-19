@@ -30,11 +30,14 @@ except ImportError:  # the tests import the modules flat
 log = logging.getLogger("hermes-bot-mobile")
 
 #: The notification channel the phone files each kind under (its name is what the person sees in Android settings).
-CHANNELS = {"approval": "Approvals", "question": "Questions", "blocked": "Questions", "routine": "Routines", "reply": "Replies", "test": "Results"}
+CHANNELS = {"approval": "Approvals", "question": "Questions", "blocked": "Questions", "routine": "Routines", "reply": "Replies", "test": "Results",
+            "call": "Calls", "call_question": "Calls"}
 
 #: Seconds a push may wait in the push service if the phone is off, and how it is flagged for delivery.
-TTL_SECONDS = {"approval": 300, "question": 3600, "blocked": 3600, "routine": 3600, "reply": 3600, "test": 60}
-URGENCY = {"approval": "high", "question": "high", "blocked": "high", "routine": "normal", "reply": "normal", "test": "high"}
+#: A phone call's question waits about a minute on the line, so its push is worthless after that.
+TTL_SECONDS = {"approval": 300, "question": 3600, "blocked": 3600, "routine": 3600, "reply": 3600, "test": 60, "call": 3600, "call_question": 60}
+URGENCY = {"approval": "high", "question": "high", "blocked": "high", "routine": "normal", "reply": "normal", "test": "high", "call": "high",
+           "call_question": "high"}
 
 BODY_LIMIT = 80
 #: A reply's preview: about two lines on the shade, the rest when it is expanded (the phone shows it as big text).
@@ -162,6 +165,12 @@ def lines(kind: str, *, detail: str = "", failed: bool = False) -> str:
 
     if kind == "reply":
         return detail
+
+    if kind == "call":
+        return detail or "A phone call needs you"
+
+    if kind == "call_question":
+        return detail or "A call is waiting on your answer"
 
     # A routine is only pushed when it broke.
     return f"Routine “{detail}” failed" if detail else "A routine failed"

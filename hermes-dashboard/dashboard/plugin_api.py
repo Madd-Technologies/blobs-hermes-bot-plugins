@@ -57,9 +57,8 @@ def _mirror() -> None:
 
 def _version() -> str:
     try:
-        import yaml
-
-        manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8")) or {}
+        S, _ = _package()
+        manifest = S.L.yaml_module().safe_load((Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8-sig")) or {}
         return str(manifest.get("version") or "")
     except Exception:
         return ""
