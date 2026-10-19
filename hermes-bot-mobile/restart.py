@@ -508,7 +508,10 @@ class Restarter:
         if not system.systemd_running():
             return {**answer, "why": "This computer does not run systemd."}
 
-        if system.environ.get("_HERMES_GATEWAY") == "1":
+        # Importing Hermes's gateway modules marks a process with _HERMES_GATEWAY=1, and a standalone `hermes dashboard`
+        # imports some of them (0.21.6), so the marker alone does not make this dashboard the gateway: only the running
+        # gateway's own pid being this process does.
+        if system.environ.get("_HERMES_GATEWAY") == "1" and system.gateway_pid() == system.pid():
             return {**answer, "why": "This dashboard runs inside the messaging gateway's process. Restart the gateway instead (POST /api/gateway/restart)."}
 
         if placement.scope == "user" and placement.uid != system.uid():

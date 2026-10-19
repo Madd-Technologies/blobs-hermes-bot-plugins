@@ -289,8 +289,16 @@ class Support(Base):
         self.assertIn("could not be asked", missing["why"])
 
     def test_not_inside_the_gateway(self):
-        answer = self.restarter(environ={"_HERMES_GATEWAY": "1"}).support()
+        me = FakeSystem().pid()
+        answer = self.restarter(environ={"_HERMES_GATEWAY": "1"}, gateway_pid=me).support()
         self.assertIn("/api/gateway/restart", answer["why"])
+
+    def test_the_gateway_marker_alone_is_not_the_gateway(self):
+        # A standalone dashboard that imported Hermes's gateway modules carries the marker too (0.21.6).
+        apart = self.restarter(environ={"_HERMES_GATEWAY": "1"}, gateway_pid=99).support()
+        self.assertEqual((apart["supported"], apart["why"]), (True, None))
+        no_gateway = self.restarter(environ={"_HERMES_GATEWAY": "1"}).support()
+        self.assertTrue(no_gateway["supported"])
 
     def test_not_when_the_gateway_shares_the_unit(self):
         answer = self.restarter(gateway_pid=99, gateway_cgroup=USER_CGROUP).support()
