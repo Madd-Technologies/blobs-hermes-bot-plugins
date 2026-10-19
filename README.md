@@ -36,7 +36,9 @@ keep getting pushes without registering again; the old folder is left as it was.
 ## Develop
 
 Each plugin has its own tests, run with the Python of a Hermes install (or any Python 3.11+ with `fastapi`, `httpx`,
-`pyyaml` and `cryptography`):
+`pyyaml` and `cryptography`). Hermes 0.21.6+ ships no PyYAML: it reads YAML through its own `hermes_yaml` (ruamel), so a
+plugin that reads YAML imports `hermes_yaml` when it is there and PyYAML only on older Hermes. A bare `import yaml` fails on
+a current server:
 
 ```sh
 python -m unittest discover -s hermes-bot-mobile/tests
