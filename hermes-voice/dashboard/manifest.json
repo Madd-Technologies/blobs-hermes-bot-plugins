@@ -2,7 +2,7 @@
   "name": "hermes-voice",
   "label": "Voice",
   "description": "Grok voice calls with your bots from the HermesBot app.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "tab": { "path": "/hermes-voice", "hidden": true },
   "entry": "dist/index.js",
   "api": "plugin_api.py"

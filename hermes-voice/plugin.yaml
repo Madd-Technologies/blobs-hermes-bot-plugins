@@ -1,5 +1,5 @@
 name: hermes-voice
-version: 0.1.0
+version: 0.1.1
 description: Grok voice calls with your bots from the HermesBot app - the phone talks to xAI directly with a one-time secret this server makes from its Grok sign-in or a bot's own xAI key; each bot's call settings are kept here.
 author: Madd Technologies
 kind: standalone

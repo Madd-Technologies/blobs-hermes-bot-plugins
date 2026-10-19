@@ -6,6 +6,7 @@
 import importlib.util
 import json
 import sys
+from unittest import mock
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,6 +117,14 @@ class Voice(unittest.TestCase):
         body = self.client.get(f"{BASE}/status").json()
         self.assertEqual(body, {"version": manifest["version"], "provider": "xai", "model": "grok-voice-latest"})
         self.assertEqual(json.loads((ROOT / "dashboard" / "manifest.json").read_text())["version"], manifest["version"])
+
+    def test_status_names_the_version_on_a_hermes_without_pyyaml(self):
+        manifest = yaml.safe_load((ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+        hermes_yaml = type(sys)("hermes_yaml")
+        hermes_yaml.safe_load = yaml.safe_load
+        # Hermes 0.21.6: its own hermes_yaml (ruamel), and no PyYAML to import.
+        with mock.patch.dict(sys.modules, {"hermes_yaml": hermes_yaml, "yaml": None}):
+            self.assertEqual(self.client.get(f"{BASE}/status").json()["version"], manifest["version"])
 
     def test_a_bot_never_set_has_calls_on_with_the_sign_in(self):
         self.assertEqual(self.bot().json(), {
