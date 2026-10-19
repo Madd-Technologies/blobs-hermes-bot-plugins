@@ -98,24 +98,31 @@ def _hermes_broadcast(payload: dict) -> None:
     broadcast_plugin_event(PLUGIN_ID, EVENT, payload)
 
 
-def _hermes_profile(sid: str) -> tuple[str, str]:
-    """The bot a live session belongs to and its stored id, from the dashboard's own session table."""
+def _hermes_session(sid: str) -> dict:
+    """The bot a live session belongs to, its stored id and its title, from the dashboard's own session table. A group
+    room member's hidden session is titled `Group: <room_id>`: the app shows those prompts on the room, not the bot."""
     try:
-        from tui_gateway.server import _sessions
+        from tui_gateway import server
     except Exception:
-        return "", ""
+        return {"profile": "", "session_key": "", "title": ""}
 
-    session = _sessions.get(sid) or {}
+    session = server._sessions.get(sid) or {}
     key = str(getattr(session.get("agent"), "session_id", None) or session.get("session_key") or "")
+    profile = title = ""
 
     try:
         from hermes_constants import profile_name_for_home
 
         profile = profile_name_for_home(session.get("profile_home")) or ""
     except Exception:
-        profile = ""
+        pass
 
-    return profile, key
+    try:
+        title = server._session_live_title(session, key) if key else str(session.get("pending_title") or "")
+    except Exception:
+        pass
+
+    return {"profile": profile, "session_key": key, "title": title}
 
 
 class NeedsYou:
@@ -125,12 +132,12 @@ class NeedsYou:
         self,
         requests: Optional[Callable[[], Any]] = None,
         broadcast: Optional[Callable[[dict], None]] = None,
-        profile_of: Optional[Callable[[str], tuple[str, str]]] = None,
+        session_of: Optional[Callable[[str], dict]] = None,
         coalesce_s: float = COALESCE_S,
     ):
         self._requests = requests or _hermes_requests
         self._broadcast = broadcast or _hermes_broadcast
-        self._profile_of = profile_of or _hermes_profile
+        self._session_of = session_of or _hermes_session
         self._coalesce_s = coalesce_s
         self._dirty = threading.Event()
         self._lock = threading.Lock()
@@ -208,14 +215,15 @@ class NeedsYou:
         for request in sorted(waiting, key=lambda r: r.created_at):
             params = dict(request.snapshot().get("params") or {})
             params.pop("session_id", None)
-            profile, key = self._profile_of(request.sid)
+            session = self._session_of(request.sid)
             entries.append(
                 {
                     "id": request.id,
                     "method": request.method,
                     "session_id": request.sid,
-                    "session_key": key,
-                    "profile": profile,
+                    "session_key": session.get("session_key", ""),
+                    "profile": session.get("profile", ""),
+                    "title": session.get("title", ""),
                     "created_at": request.created_at,
                     "params": params,
                 }

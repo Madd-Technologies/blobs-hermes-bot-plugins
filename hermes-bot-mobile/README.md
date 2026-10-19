@@ -49,7 +49,8 @@ When the dashboard mounts this plugin, `needs_you.py` swaps that table (`tui_gat
 that flags each write. A small thread waits for the flag, gathers changes 50 ms apart into one, and sends the whole list
 to every app on `/api/ws` as `plugin.hermes-bot-mobile.needs_you.changed` (through Hermes's `broadcast_plugin_event`).
 Nothing polls. The flag is set under Hermes's own lock and does nothing else; reading the list and sending it happen on
-that thread. Only the prompts a person answers are listed: the agent reading the client's terminal or window is not.
+that thread. Only the prompts a person answers are listed: the agent reading the client's terminal or window is not. Each carries its
+bot and its chat's title; a group-room member's hidden chat is titled `Group: <room_id>`, so the app shows those on the room.
 
 `GET /needs-you` is the same list, for when the app connects or reconnects (global events are not replayed). `live` is
 false on a Hermes without the table, and the app keeps its own slow check there. Not seen here: prompts the messaging
@@ -198,7 +199,7 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `PUT /settings` | each bot on or `off` (`all` and `needs_you` both mean on) |
 | `PUT /presence` | what the phone has on screen (no pushes for it) |
 | `POST /test` | send a test push |
-| `GET /needs-you` | `{live, version, requests: [{id, method, session_id, session_key, profile, created_at, params}]}`, oldest first; pushed as `plugin.hermes-bot-mobile.needs_you.changed` when it changes |
+| `GET /needs-you` | `{live, version, requests: [{id, method, session_id, session_key, profile, title, created_at, params}]}`, oldest first; pushed as `plugin.hermes-bot-mobile.needs_you.changed` when it changes |
 | `GET /rooms/{room_id}/activity` | `{members: {member_id: {phase, tool, since}}, now}` |
 | `GET /runs-on/key?profile=` | the bot's public SSH line (`null` before one is made) and its private key's path |
 | `POST /runs-on/key` | `{profile}`: makes the bot's key pair if it has none |

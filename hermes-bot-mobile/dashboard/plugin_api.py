@@ -331,7 +331,7 @@ def test(body: TestIn):
 @router.get("/needs-you")
 def needs_you() -> dict:
     """Every prompt waiting on the person across the bots this dashboard serves: `{live, version, requests: [{id, method,
-    session_id, session_key, profile, created_at, params}]}`, oldest first. `params` is the prompt as Hermes sent it (an
+    session_id, session_key, profile, title, created_at, params}]}`, oldest first. `params` is the prompt as Hermes sent it (an
     approval's command already redacted). With `live`, the same body is pushed as the `/api/ws` event
     `plugin.hermes-bot-mobile.needs_you.changed` whenever it changes, so the app reads this only when it connects."""
     start_needs_you()

@@ -65,7 +65,7 @@ class Watch(unittest.TestCase):
         self.watch = needs_you.NeedsYou(
             requests=lambda: self.hermes,
             broadcast=broadcast,
-            profile_of=lambda sid: ({"s-leto": "default", "s-hydra": "hydra"}.get(sid, ""), f"stored-{sid}"),
+            session_of=lambda sid: {"profile": {"s-leto": "default", "s-hydra": "hydra"}.get(sid, ""), "session_key": f"stored-{sid}", "title": "Bot Chat"},
             coalesce_s=0.01,
         )
 
@@ -88,6 +88,7 @@ class Watch(unittest.TestCase):
                     "session_id": "s-hydra",
                     "session_key": "stored-s-hydra",
                     "profile": "hydra",
+                    "title": "Bot Chat",
                     "created_at": asked.created_at,
                     "params": {"command": "rm -r <redacted>", "description": "delete files", "choices": ["once", "deny"]},
                 }
@@ -108,7 +109,7 @@ class Watch(unittest.TestCase):
         self.assertEqual([entry["method"] for entry in pushed["requests"]], ["clarify"])
 
     def test_sends_one_push_for_changes_that_land_together(self):
-        self.watch = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=self.sent.append, profile_of=lambda sid: ("", ""), coalesce_s=0.2)
+        self.watch = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=self.sent.append, session_of=lambda sid: {}, coalesce_s=0.2)
         self.watch.install()
         for n in range(3):
             self.hermes.open(Request("s-leto", "clarify", {"questions": [{"id": f"q{n}"}]}))
@@ -151,7 +152,7 @@ class Watch(unittest.TestCase):
         self.assertTrue(self.watch.install())
         self.assertIs(self.hermes._open, table)
 
-        other = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=self.sent.append, profile_of=lambda sid: ("", ""), coalesce_s=0.01)
+        other = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=self.sent.append, session_of=lambda sid: {}, coalesce_s=0.01)
         other.install()
         self.assertIs(self.hermes._open, table, "a second copy of the module shares the swapped table")
 
@@ -172,7 +173,7 @@ class Watch(unittest.TestCase):
             if len(calls) == 1:
                 raise RuntimeError("peer gone")
 
-        watch = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=flaky, profile_of=lambda sid: ("", ""), coalesce_s=0.01)
+        watch = needs_you.NeedsYou(requests=lambda: self.hermes, broadcast=flaky, session_of=lambda sid: {}, coalesce_s=0.01)
         watch.install()
         first = self.hermes.open(Request("s-leto", "approval"))
         time.sleep(0.1)
