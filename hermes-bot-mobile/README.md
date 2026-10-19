@@ -106,6 +106,11 @@ systemd forgets both once they have run. Only this process's own unit is restart
 command (a body with any other field is refused), the unit name must look like a plain systemd service name, and every
 command is an argv list, never a shell. `journalctl --user -u hermes-bot-restart-<ts>` shows what happened.
 
+**Inside the gateway?** A dashboard served by the messaging gateway's own process cannot restart itself (the gateway's
+restart is the way). Importing Hermes's gateway modules marks a process with `_HERMES_GATEWAY=1`, and a standalone
+`hermes dashboard` imports some of them (0.21.6), so since 0.1.8 the marker counts only when the running gateway's pid is
+this very process.
+
 **The gateway.** Hermes 0.21.5 already restarts the gateway with `POST /api/gateway/restart`; to restart only the
 gateway, call that. With `include_gateway`, this plugin restarts both, in this order:
 
