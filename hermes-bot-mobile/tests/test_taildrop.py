@@ -19,22 +19,22 @@ from test_api import load_api
 
 # The CLI's own output formats (tailscale v1.104.1, cmd/tailscale/cli/file.go, whois.go and cli.go), with made-up devices.
 TARGETS = (
-    "100.101.102.103\tpixel-9\n"
-    "100.101.102.104\tworkstation\toffline; last seen 3h12m0s ago\n"
+    "100.64.0.13\tpixel-9\n"
+    "100.64.0.14\tworkstation\toffline; last seen 3h12m0s ago\n"
     "fd7a:115c:a1e0::5\tlab-box\tunknown-status\n"
 )
 WHOIS = json.dumps({
     "Node": {
         "ID": 1234, "StableID": "nExample1CNTRL", "Name": "pixel-9.example-tailnet.ts.net.", "ComputedName": "pixel-9",
-        "Addresses": ["100.101.102.103/32", "fd7a:115c:a1e0::3/128"], "Hostinfo": {"OS": "android", "Hostname": "Pixel 9"},
+        "Addresses": ["100.64.0.13/32", "fd7a:115c:a1e0::3/128"], "Hostinfo": {"OS": "android", "Hostname": "Pixel 9"},
     },
     "UserProfile": {"ID": 99, "LoginName": "person@example.com", "DisplayName": "Person"},
     "CapMap": {},
 }, indent=2)
-STATUS = json.dumps({"BackendState": "Running", "Self": {"HostName": "server", "TailscaleIPs": ["100.101.102.100"], "NoFileSharingReason": ""}})
+STATUS = json.dumps({"BackendState": "Running", "Self": {"HostName": "server", "TailscaleIPs": ["100.64.0.10"], "NoFileSharingReason": ""}})
 DENIED = (
     "Access denied: file access denied\n\n"
-    "Use 'sudo tailscale file cp --name=report.pdf /dev/fd/7 100.101.102.103:'.\n"
+    "Use 'sudo tailscale file cp --name=report.pdf /dev/fd/7 100.64.0.13:'.\n"
     "To not require root, use 'sudo tailscale set --operator=$USER' once.\n"
 )
 DAEMON_DOWN = (
@@ -195,8 +195,8 @@ class Base(unittest.TestCase):
 class Parsers(unittest.TestCase):
     def test_targets(self):
         self.assertEqual(taildrop.parse_targets(TARGETS), [
-            {"name": "pixel-9", "ip": "100.101.102.103", "online": True, "detail": None},
-            {"name": "workstation", "ip": "100.101.102.104", "online": False, "detail": "offline; last seen 3h12m0s ago"},
+            {"name": "pixel-9", "ip": "100.64.0.13", "online": True, "detail": None},
+            {"name": "workstation", "ip": "100.64.0.14", "online": False, "detail": "offline; last seen 3h12m0s ago"},
             {"name": "lab-box", "ip": "fd7a:115c:a1e0::5", "online": None, "detail": "unknown-status"},
         ])
 
@@ -206,7 +206,7 @@ class Parsers(unittest.TestCase):
         self.assertEqual(taildrop.parse_targets(""), [])
 
     def test_whois(self):
-        self.assertEqual(taildrop.parse_whois(WHOIS), {"name": "pixel-9", "os": "android", "addresses": ["100.101.102.103", "fd7a:115c:a1e0::3"]})
+        self.assertEqual(taildrop.parse_whois(WHOIS), {"name": "pixel-9", "os": "android", "addresses": ["100.64.0.13", "fd7a:115c:a1e0::3"]})
         # No ComputedName or OS (a node's own Hostinfo can be that short): the first label of its DNS name.
         bare = json.dumps({"Node": {"Name": "lab-box.example-tailnet.ts.net.", "Hostinfo": {"Hostname": "lab"}}})
         self.assertEqual(taildrop.parse_whois(bare), {"name": "lab-box", "os": None, "addresses": []})
@@ -238,7 +238,7 @@ class Parsers(unittest.TestCase):
         self.assertEqual((len(long), long[-4:]), (128, ".pdf"))
 
     def test_the_cli_call(self):
-        self.assertEqual(taildrop.cp_argv("/usr/bin/tailscale", 7, "report.pdf", "100.101.102.103"), ["/usr/bin/tailscale", "file", "cp", "--name=report.pdf", "/dev/fd/7", "100.101.102.103:"])
+        self.assertEqual(taildrop.cp_argv("/usr/bin/tailscale", 7, "report.pdf", "100.64.0.13"), ["/usr/bin/tailscale", "file", "cp", "--name=report.pdf", "/dev/fd/7", "100.64.0.13:"])
         self.assertEqual(taildrop.target_arg("fd7a:115c:a1e0::5"), "[fd7a:115c:a1e0::5]:")
 
     def test_the_size_cap(self):
@@ -251,15 +251,15 @@ class Parsers(unittest.TestCase):
 
 class Status(Base):
     def test_lists_the_devices_and_says_who_is_asking(self):
-        status = self.sender().status("100.101.102.103")
+        status = self.sender().status("100.64.0.13")
         self.assertEqual((status["supported"], status["why"], status["setup"], status["sending"]), (True, None, None, []))
         self.assertEqual([(t["name"], t["you"]) for t in status["targets"]], [("pixel-9", True), ("workstation", False), ("lab-box", False)])
-        self.assertEqual(status["you"], {"name": "pixel-9", "os": "android", "ip": "100.101.102.103"})
-        self.assertIn(["/usr/bin/tailscale", "whois", "--json", "100.101.102.103"], self.system.ran)
+        self.assertEqual(status["you"], {"name": "pixel-9", "os": "android", "ip": "100.64.0.13"})
+        self.assertIn(["/usr/bin/tailscale", "whois", "--json", "100.64.0.13"], self.system.ran)
 
     def test_a_dual_stack_address_is_asked_about_as_ipv4(self):
-        self.sender().status("::ffff:100.101.102.103")
-        self.assertIn(["/usr/bin/tailscale", "whois", "--json", "100.101.102.103"], self.system.ran)
+        self.sender().status("::ffff:100.64.0.13")
+        self.assertIn(["/usr/bin/tailscale", "whois", "--json", "100.64.0.13"], self.system.ran)
 
     def test_someone_not_on_the_tailnet(self):
         status = self.sender(whois=None).status("127.0.0.1")
@@ -270,7 +270,7 @@ class Status(Base):
         self.assertFalse(any(argv[1] == "whois" for argv in self.system.ran))
 
     def test_without_tailscale(self):
-        status = self.sender(installed=False).status("100.101.102.103")
+        status = self.sender(installed=False).status("100.64.0.13")
         self.assertEqual((status["supported"], status["targets"]), (False, []))
         self.assertIn("not installed", status["why"])
 
@@ -341,7 +341,7 @@ class Sending(Base):
         argv = call["argv"]
         self.assertEqual(argv[:4], ["/usr/bin/tailscale", "file", "cp", "--name=report.pdf"])
         self.assertRegex(argv[4], r"^/dev/fd/\d+$")
-        self.assertEqual(argv[5], "100.101.102.103:")
+        self.assertEqual(argv[5], "100.64.0.13:")
         self.assertEqual(call["content"], self.report.read_bytes())
         self.assertEqual(started["state"], "running")
 
@@ -376,7 +376,7 @@ class Sending(Base):
     def test_the_list_is_read_again_for_every_send(self):
         sender = self.sender()
         sender.send("pixel-9", source=self.checked(sender))
-        self.system.answers[("file", "cp", "--targets")] = done(stdout="100.101.102.104\tworkstation\n")
+        self.system.answers[("file", "cp", "--targets")] = done(stdout="100.64.0.14\tworkstation\n")
         self.refused(lambda: sender.send("pixel-9", source=self.checked(sender)), 422)
 
     def test_a_patch_goes_as_a_temporary_file_that_is_deleted_after(self):
@@ -514,7 +514,7 @@ class Routes(unittest.TestCase):
         self.module._TAILDROP = self.module._taildrop().Taildrop(Path(self.dir.name) / "data", system=self.system, files=lambda: self.files, start=lambda target: target())
         app = FastAPI()
         app.include_router(self.module.router, prefix="/api/plugins/hermes-bot-mobile")
-        self.client = TestClient(app, client=("100.101.102.103", 50000))
+        self.client = TestClient(app, client=("100.64.0.13", 50000))
         self.url = "/api/plugins/hermes-bot-mobile/taildrop"
 
     def tearDown(self):
@@ -539,7 +539,7 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.client.delete(f"{self.url}/{send_id}").status_code, 409)
 
     def test_send_a_patch(self):
-        response = self.client.post(self.url, json={"target": "100.101.102.104", "diff": "+x\n", "name": "fix"})
+        response = self.client.post(self.url, json={"target": "100.64.0.14", "diff": "+x\n", "name": "fix"})
         self.assertEqual(response.status_code, 202)
         self.assertEqual(self.system.started[-1]["argv"][3], "--name=fix.patch")
 
