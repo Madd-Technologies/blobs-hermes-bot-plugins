@@ -1,0 +1,9 @@
+{
+  "name": "hermes-phone",
+  "label": "Phone",
+  "description": "Phone errands for your bots through your own Twilio number, approved in the HermesBot app.",
+  "version": "0.1.0",
+  "tab": { "path": "/hermes-phone", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
