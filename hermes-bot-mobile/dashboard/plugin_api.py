@@ -1,6 +1,7 @@
 """The phone app's side of hermes-bot-mobile: register a device, change how loud each bot is, send a test, read what
 each bot in a group room is doing right now, set up where a bot's commands run (its SSH key and a connection check),
-restart this dashboard (and the gateway) from the app, and Taildrop a file from this server to one of the person's devices.
+restart this dashboard (and the gateway) from the app, Taildrop a file from this server to one of the person's devices,
+and push what waits on the person (Needs you) to the app the moment it changes.
 
 Mounted by `hermes serve` under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's own sign-in, so only someone
 who can already use the server can reach it. Hermes imports this file on its own, apart from the plugin package,
@@ -100,6 +101,36 @@ def _sender():
             _TAILDROP = _taildrop().Taildrop()
 
         return _TAILDROP
+
+
+def _needs_you_module():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.needs_you")
+
+
+#: The one watch of this dashboard's prompts: it swaps Hermes's open-requests table once per process.
+_NEEDS_YOU = None
+_NEEDS_YOU_LOCK = threading.Lock()
+
+
+def _needs_you():
+    global _NEEDS_YOU
+
+    with _NEEDS_YOU_LOCK:
+        if _NEEDS_YOU is None:
+            _NEEDS_YOU = _needs_you_module().NeedsYou()
+
+        return _NEEDS_YOU
+
+
+def start_needs_you() -> bool:
+    """Starts pushing Needs you to the app. Called when the dashboard mounts this file; a Hermes without the table (or
+    a process without the gateway, like `hermes plugins validate`) just leaves the app on its own check."""
+    try:
+        return _needs_you().install()
+    except Exception:
+        return False
 
 
 def _refusal(refusal) -> JSONResponse:
@@ -297,6 +328,17 @@ def test(body: TestIn):
     return {"results": results}
 
 
+@router.get("/needs-you")
+def needs_you() -> dict:
+    """Every prompt waiting on the person across the bots this dashboard serves: `{live, version, requests: [{id, method,
+    session_id, session_key, profile, created_at, params}]}`, oldest first. `params` is the prompt as Hermes sent it (an
+    approval's command already redacted). With `live`, the same body is pushed as the `/api/ws` event
+    `plugin.hermes-bot-mobile.needs_you.changed` whenever it changes, so the app reads this only when it connects."""
+    start_needs_you()
+
+    return _needs_you().snapshot()
+
+
 @router.get("/rooms/{room_id}/activity")
 def room_activity(room_id: str) -> dict:
     """What each bot in this room is doing right now: `{members: {member_id: {phase, tool, since}}, now}`.
@@ -437,3 +479,8 @@ def taildrop_cancel(send_id: str):
         return _sender().cancel(send_id)
     except taildrop.Refused as refusal:
         return _refusal(refusal)
+
+
+# The watch starts with the dashboard, not with the app's first read: a prompt opened before the app connects is pushed
+# the same way. Tests load this file without a gateway, where this does nothing.
+start_needs_you()

@@ -38,6 +38,24 @@ the `on_room_member_activity` hook (Hermes 0.21.5+) this keeps what each bot is 
 name), thinking, writing, or waiting for your OK. Only the phase, the tool's name and when it began are kept, never text,
 tool arguments or output, in one small file per room, written only when a phase changes.
 
+## Needs you, pushed
+
+Since 0.1.6 the app's Needs you is pushed, not polled. Hermes keeps every prompt it has put to a client (an approval, a
+question, sudo, a secret, a vault prompt) in one in-memory table in the dashboard's process, shared by every bot it serves:
+the app's own chats, other clients' chats and group-room members. It has no event for a prompt opening or closing
+(`sessions.changed` only follows `state.db`), so the app used to ask about every busy chat on a timer.
+
+When the dashboard mounts this plugin, `needs_you.py` swaps that table (`tui_gateway.server_requests._open`) for one
+that flags each write. A small thread waits for the flag, gathers changes 50 ms apart into one, and sends the whole list
+to every app on `/api/ws` as `plugin.hermes-bot-mobile.needs_you.changed` (through Hermes's `broadcast_plugin_event`).
+Nothing polls. The flag is set under Hermes's own lock and does nothing else; reading the list and sending it happen on
+that thread. Only the prompts a person answers are listed: the agent reading the client's terminal or window is not.
+
+`GET /needs-you` is the same list, for when the app connects or reconnects (global events are not replayed). `live` is
+false on a Hermes without the table, and the app keeps its own slow check there. Not seen here: prompts the messaging
+gateway asks (Telegram and the like, answered there), and with `dashboard.turn_isolation` on, a turn's prompts, which
+live in its compute-host child. Routines never prompt.
+
 ## Where a bot runs
 
 <!-- Kept free of the trusted-keys file's name: Hermes's install scan reads an instruction to add to it as a backdoor. -->
@@ -180,6 +198,7 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `PUT /settings` | each bot on or `off` (`all` and `needs_you` both mean on) |
 | `PUT /presence` | what the phone has on screen (no pushes for it) |
 | `POST /test` | send a test push |
+| `GET /needs-you` | `{live, version, requests: [{id, method, session_id, session_key, profile, created_at, params}]}`, oldest first; pushed as `plugin.hermes-bot-mobile.needs_you.changed` when it changes |
 | `GET /rooms/{room_id}/activity` | `{members: {member_id: {phase, tool, since}}, now}` |
 | `GET /runs-on/key?profile=` | the bot's public SSH line (`null` before one is made) and its private key's path |
 | `POST /runs-on/key` | `{profile}`: makes the bot's key pair if it has none |
@@ -211,4 +230,6 @@ restarting on a Linux server: it restarts a throwaway transient unit of its own 
 make on the real dashboard. The Taildrop tests fake the CLI with its real output formats; with `HERMES_AGENT` set to a
 Hermes 0.21.5+ checkout they also ask Hermes's real download route and the plugin the same questions
 (`tests/parity_taildrop.py`) and expect the same answers. `tests/integration_taildrop.py` is the end-to-end check on a
-Linux server with Tailscale (read only, or `--send <device>` for one small file).
+Linux server with Tailscale (read only, or `--send <device>` for one small file). `tests/integration_needs_you.py`, with
+`HERMES_AGENT` set to a Hermes 0.21.5+ checkout, opens and answers a real approval request through Hermes's gateway and
+checks that a connected client was pushed both changes.
