@@ -31,6 +31,13 @@ sent to triage after blocking twice for the same reason, is pushed as "Needs you
 Questions channel); a card that only waits on another card (it moves to todo) is not. Tapping it opens Needs you, where
 hermes-dashboard 0.5.0+ shows the card as Background work and a note on it is your answer. One push per block.
 
+**Pushes for other plugins (0.1.7).** `push_api.py` is a small, stable entry point for this server's other plugins and
+services, today hermes-phone's call service. It sends two kinds on a new Android channel, "Calls": `call` (a phone errand
+waits for the person's OK, or finished) and `call_question` (a call on the line waits about a minute for an answer: high
+urgency, a 60 s TTL). It uses the phones and VAPID key this plugin already keeps, respects a bot set to `off`, redacts
+secrets, cuts the text to one short line, and lands on the app's Needs you list unless the caller names a link. The other
+process loads the module from the installed plugin folder; nothing else here changes.
+
 ## Live room activity
 
 Hermes runs a group-room member's turn on a hidden session, and the room log only says when it started and settled. Through
@@ -40,7 +47,7 @@ tool arguments or output, in one small file per room, written only when a phase 
 
 ## Needs you, pushed
 
-Since 0.1.6 the app's Needs you is pushed, not polled. Hermes keeps every prompt it has put to a client (an approval, a
+Since 0.1.7 the app's Needs you is pushed, not polled. Hermes keeps every prompt it has put to a client (an approval, a
 question, sudo, a secret, a vault prompt) in one in-memory table in the dashboard's process, shared by every bot it serves:
 the app's own chats, other clients' chats and group-room members. It has no event for a prompt opening or closing
 (`sessions.changed` only follows `state.db`), so the app used to ask about every busy chat on a timer.
@@ -79,7 +86,7 @@ On SSH, Hermes copies the bot's skills and credential files to `~/.hermes` on th
 
 ## Restart from the app
 
-Since 0.1.6 the app can restart Hermes's dashboard (`hermes dashboard`, the server the app talks to) from a button, and
+Since 0.1.7 the app can restart Hermes's dashboard (`hermes dashboard`, the server the app talks to) from a button, and
 the messaging gateway with it. It needs Linux with systemd 236 or later, and the dashboard running as a systemd service
 of its own (usually a `--user` unit such as `hermes-dashboard.service`).
 
@@ -143,7 +150,7 @@ dashboard stopped before the request was carried out).
 
 ## Taildrop from the server
 
-Since 0.1.6 the app's file viewer can send the file it shows to one of the person's devices with
+Since 0.1.7 the app's file viewer can send the file it shows to one of the person's devices with
 [Taildrop](https://tailscale.com/kb/1106/taildrop): this server runs `tailscale file cp`, so the file goes from the
 server to the device over the tailnet and never through the phone. It needs Tailscale on the server, and Hermes
 0.21.5 or later (for its download check).
