@@ -1,5 +1,5 @@
 name: hermes-dashboard
-version: 0.5.1
+version: 0.5.2
 description: Collections each bot designs and keeps for its person (its own fields, a status, history), shown as panels in the HermesBot app; a skill teaches bots to build them from any data and keep them fresh. Each bot's kanban cards show as Background work, where a blocked card needs you and your note answers it.
 author: Madd Technologies
 kind: standalone
