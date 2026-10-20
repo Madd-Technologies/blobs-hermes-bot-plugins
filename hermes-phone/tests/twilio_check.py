@@ -6,7 +6,8 @@ person. Or let it ring out to your voicemail. Nothing here reads or writes the r
     <python with starlette, uvicorn and websockets> hermes-phone/tests/twilio_check.py --env FILE --public URL
 
 - `--env FILE`: `KEY=value` lines (kept private, never printed):
-  - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (optionally `TWILIO_API_KEY` / `TWILIO_API_SECRET`)
+  - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (optionally `TWILIO_API_KEY` / `TWILIO_API_SECRET`), each
+    plain or with the plugin's `HERMES_PHONE_` prefix (this file isn't Hermes's `.env`)
   - `CHECK_CALL`: the phone to call (yours; on a trial account it must be a verified number)
   - `XAI_API_KEY`, unless `--mint-cmd` gives Grok sessions instead (see `tests/live.py`)
 - `--public URL`: the `https://` address that reaches `127.0.0.1:<--port>`, for example
@@ -197,7 +198,9 @@ def masked_record(errand: Dict[str, Any], told: Told) -> Dict[str, Any]:
 
 async def main_async(args: argparse.Namespace) -> int:
     env = T.read_env(Path(args.env).expanduser())
-    creds = T.credentials(env)
+    keys = {T.PREFIX + name: env.get(T.PREFIX + name) or env.get(name, "") for name in T.NAMES}
+    keys = {k: v for k, v in keys.items() if v}
+    creds = T.credentials(keys)
     to = dialing.try_normalize(env.get("CHECK_CALL", ""))
     if not creds:
         print("The env file needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER.")
@@ -225,7 +228,6 @@ async def main_async(args: argparse.Namespace) -> int:
     errand: Dict[str, Any] = {}
     service: Optional[V.Service] = None
     try:
-        keys = {k: v for k, v in env.items() if k.startswith("TWILIO_")}
         env_file = home / ".env"
         env_file.write_text("".join(f"{k}={v}\n" for k, v in keys.items()), encoding="utf-8")
         os.chmod(env_file, 0o600)

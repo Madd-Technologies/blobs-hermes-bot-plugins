@@ -15,7 +15,7 @@ import phone_tools  # noqa: E402
 import store as S  # noqa: E402
 
 BASE = "/api/plugins/hermes-phone"
-ENV = "TWILIO_ACCOUNT_SID=AC1\nTWILIO_AUTH_TOKEN=tok\nTWILIO_PHONE_NUMBER=+12025550123\n"
+ENV = "HERMES_PHONE_TWILIO_ACCOUNT_SID=AC1\nHERMES_PHONE_TWILIO_AUTH_TOKEN=tok\nHERMES_PHONE_TWILIO_PHONE_NUMBER=+12025550123\n"
 
 
 def load_api():
