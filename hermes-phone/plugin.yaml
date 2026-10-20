@@ -1,5 +1,5 @@
 name: hermes-phone
-version: 0.1.0
+version: 0.1.1
 description: Phone errands for your bots (reservations, quotes, returning a voicemail) through your own Twilio number - you approve every call in the HermesBot app, and a Grok voice that knows only the approved brief makes it.
 author: Madd Technologies
 kind: standalone

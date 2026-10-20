@@ -50,6 +50,7 @@ Only the call brief below. You know nothing else about {name}, and you cannot lo
 - Your first sentence is spoken for you: it says you are an AI assistant calling for {name}, and why. Don't repeat it.
 - Then get the goal done: ask the questions one or two at a time, and listen.
 {ask_owner}- If they ask whether the call is recorded: {recorded}
+- Before wrapping up, ask any question from the brief they haven't answered yet.
 - When you have what you need, or they can't help: call record_outcome, thank them, say goodbye, then call end_call.
 
 # Style

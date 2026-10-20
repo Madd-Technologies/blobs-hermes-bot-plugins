@@ -71,7 +71,7 @@ base = "/api/plugins/hermes-phone"
 
 status = client.get(f"{base}/status").json()
 print("status:", status)
-assert status["version"] == "0.1.0" and status["line"] == {"set": True, "number": "…23"}, status
+assert status["version"] == "0.1.1" and status["line"] == {"set": True, "number": "…23"}, status
 
 settings = client.put(f"{base}/settings", json={"name": "Alex", "never_share_add": [{"label": "Home address", "value": "12 Orchard Lane, Pinecrest"}],
                                                 "test_numbers": ["202-555-0101"]}).json()

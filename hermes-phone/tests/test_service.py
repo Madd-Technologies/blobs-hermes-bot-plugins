@@ -27,8 +27,9 @@ LOUD = ulaw.frames(ulaw.tone("5"))[0]
 
 class FakeRest:
     def __init__(self, sid="CA1", error=None):
-        self.created, self.hung = [], []
+        self.created, self.hung, self.looked_up = [], [], []
         self.sid, self.error = sid, error
+        self.status = "ringing"
 
     def create_call(self, *args):
         if self.error:
@@ -38,6 +39,10 @@ class FakeRest:
 
     def hang_up(self, sid):
         self.hung.append(sid)
+
+    def call_status(self, sid):
+        self.looked_up.append(sid)
+        return self.status
 
 
 class FakeGrok:
@@ -143,6 +148,35 @@ class Webhooks(Base):
         call = self.store.errand(errand["id"])["calls"][0]
         self.assertEqual((call["status"], call["outcome"]["notes"]), ("done", "The line was busy."))
         self.assertIsNone(self.service.dialing)
+
+    def test_a_call_blocked_before_it_rang_says_so(self):
+        errand = self.approved()
+        self.step()
+        token = errand["calls"][0]["token"]
+        self.signed_post(f"/twilio/status/{token}", {"CallSid": "CA1", "CallStatus": "busy", "SipResponseCode": "603"})
+        call = self.store.errand(errand["id"])["calls"][0]
+        self.assertEqual(call["outcome"]["status"], "no_answer")
+        self.assertIn("possible spam", call["outcome"]["notes"])
+
+    def test_a_call_whose_callbacks_were_lost_is_looked_up(self):
+        errand = self.approved()
+        self.step()
+        self.t[0] += V.CHECK_AFTER_S - 1
+        self.step()
+        self.assertEqual(self.rest.looked_up, [])
+        self.t[0] += 2
+        self.step()
+        call = self.store.errand(errand["id"])["calls"][0]
+        self.assertEqual((self.rest.looked_up, call["status"]), (["CA1"], "ringing"))
+        self.t[0] += 1
+        self.step()
+        self.assertEqual(len(self.rest.looked_up), 1)  # not again before CHECK_EVERY_S
+        self.rest.status = "busy"
+        self.t[0] += V.CHECK_EVERY_S
+        self.step()
+        first, second = self.store.errand(errand["id"])["calls"]
+        self.assertEqual((first["status"], first["outcome"]["notes"]), ("done", "The line was busy."))
+        self.assertEqual(self.service.dialing, second["token"])  # and the same step moved on to the next call
 
     def test_unsigned_callbacks_change_nothing(self):
         errand = self.approved()

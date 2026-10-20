@@ -57,8 +57,21 @@ QUESTION_WAIT_S = 60
 NOTIFY_RETRY_S = 60
 NOTIFY_GIVE_UP_S = 30 * 60
 START_WAIT_S = 10
+#: The server binds its port only after startup returns, so the first dial waits until Twilio's callbacks can reach it.
+FIRST_STEP_S = 2.0
+#: Twilio doesn't retry a status callback that failed (a tunnel hiccup, a restart), so a dialed call that has gone quiet
+#: this long is looked up instead of waited out, and again every CHECK_EVERY_S.
+CHECK_AFTER_S = RING_S + 15
+CHECK_EVERY_S = 20
 READY_WAIT_S = 6
 TERMINAL = ("done", "failed", "skipped", "cancelled")
+#: SIP codes in Twilio's final callback for a call turned away before it rang. Carriers screen new or low-trust numbers
+#: this way (a personal Twilio account's calls go out with the lowest SHAKEN/STIR attestation, C).
+BLOCKED = {
+    "603": "Turned away before it rang (603): they declined, or their carrier screened it as possible spam.",
+    "607": "They marked the call as unwanted (607).",
+    "608": "Their carrier blocked it as possible spam (608).",
+}
 TWILIO_FINAL = {"busy": "no_answer", "no-answer": "no_answer", "failed": "failed", "canceled": "cancelled", "completed": "no_answer"}
 
 
@@ -86,6 +99,7 @@ class Service:
         self.live: Dict[str, Live] = {}
         self.dialing: Optional[str] = None
         self.dialed_at = 0.0
+        self.checked_at = 0.0
         self.started = clock()
         self.beat_at = 0.0
         self.app = Starlette(routes=[
@@ -131,17 +145,21 @@ class Service:
         found = self.store.find_call(token) if form is not None else None
         if found is None:
             return Response(status_code=403 if form is None else 204)
-        errand, call = found
-        twilio_status = form.get("CallStatus", "")
+        self._twilio_says(*found, form.get("CallStatus", ""), form.get("SipResponseCode", ""))
+        return Response(status_code=204)
+
+    def _twilio_says(self, errand: Dict[str, Any], call: Dict[str, Any], twilio_status: str, sip: str = "") -> None:
+        """A call's status from Twilio (its callback, or a lookup): ringing, or over before its stream began."""
+        token = call["token"]
         if twilio_status == "ringing" and call["status"] == "dialing":
             self.store.update_call(errand["id"], call["id"], lambda c: c.update(status="ringing"))
         elif twilio_status in TWILIO_FINAL and token not in self.live and call["status"] in ("dialing", "ringing"):
-            outcome = {"status": "no_answer", "notes": {"busy": "The line was busy.", "failed": "The call couldn't be placed."}.get(twilio_status, "Nobody answered.")}
+            note = BLOCKED.get(sip) or {"busy": "The line was busy.", "failed": "The call couldn't be placed."}.get(twilio_status, "Nobody answered.")
+            outcome = {"status": "no_answer", "notes": note}
             self.store.update_call(errand["id"], call["id"], lambda c: c.update(status="done" if twilio_status != "failed" else "failed",
                                                                                  outcome=outcome, ended=self.clock()))
             if self.dialing == token:
                 self.dialing = None
-        return Response(status_code=204)
 
     async def amd(self, request: Request) -> Response:
         token = request.path_params["token"]
@@ -326,6 +344,9 @@ class Service:
     async def step(self) -> None:
         self.store.expire_pending()
         await self._hangups()
+        if (self.dialing is not None and not self.live and self.clock() - self.dialed_at > CHECK_AFTER_S
+                and self.clock() - self.checked_at > CHECK_EVERY_S):
+            await self._look_up_dialing()
         if not self.live and (self.dialing is None or self.clock() - self.dialed_at > RING_S + 90):
             if self.dialing is not None:
                 self._dial_timed_out(self.dialing)
@@ -349,6 +370,18 @@ class Service:
                             await asyncio.to_thread(self.rest(self.creds()).hang_up, call["sid"])
                         except T.TwilioError:
                             pass
+
+    async def _look_up_dialing(self) -> None:
+        self.checked_at = self.clock()
+        found = self.store.find_call(self.dialing or "")
+        creds = self.creds()
+        if not found or not found[1].get("sid") or not creds:
+            return
+        try:
+            twilio_status = await asyncio.to_thread(self.rest(creds).call_status, found[1]["sid"])
+        except T.TwilioError:
+            return
+        self._twilio_says(*found, twilio_status)
 
     def _dial_timed_out(self, token: str) -> None:
         found = self.store.find_call(token)
@@ -436,6 +469,7 @@ class Service:
     @asynccontextmanager
     async def _lifespan(self, app):
         async def loop():
+            await asyncio.sleep(FIRST_STEP_S)
             while True:
                 try:
                     await self.step()
