@@ -239,7 +239,7 @@ class Service:
             self.store.update_call(errand["id"], call["id"], lambda c: c.update(update))
 
         setup = M.Setup(brief=errand["brief"], call=call, name=settings["name"], voice=voice, callback=creds["number"],
-                        ask_owner=bool(settings["ask_owner"]), transcripts=bool(settings["transcripts"]),
+                        ask_owner=bool(settings["ask_owner"]), transcripts=bool(settings["transcripts"]), opener=str(settings.get("opener") or ""),
                         max_minutes=int(settings["max_minutes"]), hold_minutes=int(settings["hold_minutes"]), never_share=list(settings["never_share"]))
         brain = M.Brain(setup, M.Ports(grok=to_grok, twilio=to_twilio, hang_up=hang_up, ask_owner=lambda q: self._ask(errand, call, q),
                                        save=save, clock=self.clock, log=lambda message: log.info("hermes-phone: call %s: %s", call["id"], message)))

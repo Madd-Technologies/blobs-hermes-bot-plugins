@@ -3,7 +3,7 @@
 Transport-free (the service and the tests give it ports), so every rule here is tested without a network:
 
 - **Greeting:** voice detection starts off. The service listens to who answered. A short greeting then quiet gets the
-  opening line (the AI disclosure, spoken word for word). A long one is a menu or recording, and the voice handles it
+  opening line (who is calling and why, spoken word for word). A long one is a menu or recording, and the voice handles it
   with its tools; the opening is said the first time a live person is on the line.
 - **Hold mode** (`stay_silent`): Grok's audio is dropped before Twilio and any response is cancelled, so a slip is never
   heard. Voice detection goes off and nothing is committed (on xAI a commit starts a reply); the buffer is cleared every
@@ -154,6 +154,8 @@ class Setup:
     callback: str = ""
     ask_owner: bool = True
     transcripts: bool = True
+    #: The person's own opening line, or "" for the standard disclosure (persona.disclosure).
+    opener: str = ""
     max_minutes: int = 20
     hold_minutes: int = 15
     never_share: List[Dict[str, str]] = field(default_factory=list)  # never sent to the voice; only screens what crosses
@@ -318,7 +320,7 @@ class Brain:
         self.state.human = True
         # No commit: on xAI it would start a reply of its own next to the scripted line. What they said stays in the buffer
         # and goes in with their next turn.
-        await self._say("opening", P.opening(self.setup.brief, self.setup.name, self.setup.transcripts))
+        await self._say("opening", P.opening(self.setup.brief, self.setup.name, self.setup.transcripts, self.setup.opener))
 
     async def _opening_played(self) -> None:
         if self.state.phase != "opening" or not self.state.opening_said:
@@ -349,7 +351,7 @@ class Brain:
         if self.state.response:
             await self._grok({"type": "response.cancel"})
         await self._twilio("clear")
-        await self._say("voicemail", P.voicemail(self.setup.brief, self.setup.name, self.setup.callback, self.setup.transcripts))
+        await self._say("voicemail", P.voicemail(self.setup.brief, self.setup.name, self.setup.callback, self.setup.transcripts, self.setup.opener))
 
     # Grok
 
@@ -484,7 +486,7 @@ class Brain:
         if self.state.screening != "listening":
             return
         self.state.screening = "answering"
-        await self._say("screen", P.opening(self.setup.brief, self.setup.name, self.setup.transcripts))
+        await self._say("screen", P.opening(self.setup.brief, self.setup.name, self.setup.transcripts, self.setup.opener))
 
     async def _screen_answered(self) -> None:
         if self.state.screening != "answering":

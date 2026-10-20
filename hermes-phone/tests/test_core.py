@@ -179,6 +179,22 @@ class Persona(unittest.TestCase):
         finally:
             B.CALLBACKS = False
 
+    def test_the_persons_own_opening_line(self):
+        # Their own words replace the standard sentence, {name} included; the reason for the call still follows.
+        self.assertEqual(P.opening(self.brief, "Alex", True, "Hi, I'm calling for {name}"),
+                         "Hi, I'm calling for Alex. I'm calling to get a quote for pumping a septic tank.")
+        self.assertEqual(P.disclosure("Alex", True, "  Hello there!  "), "Hello there!")
+        self.assertEqual(P.disclosure("Alex", True, "   "), "Hi, this is an AI assistant calling for Alex. This call is transcribed.")
+        message = P.voicemail(self.brief, "Alex", CALLBACK, True, "Hi, this is Alex's assistant.")
+        self.assertTrue(message.startswith("Hi, this is Alex's assistant. I'm calling to get a quote"), message)
+
+    def test_the_voice_never_says_it_is_a_person(self):
+        # Whatever the opening line says, asked straight out the voice says it is an AI.
+        instructions = P.session(self.brief, self.brief["calls"][0], "Alex", "eve", ask_owner=True)["instructions"]
+        self.assertIn("If they ask whether you're an AI, a robot or a recording, say yes", instructions)
+        self.assertIn("Never claim to be a person.", instructions)
+        self.assertNotIn("it says you are an AI assistant calling for", instructions)
+
 
 if __name__ == "__main__":
     unittest.main()
