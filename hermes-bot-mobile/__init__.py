@@ -9,6 +9,8 @@ Standalone plugin, formerly hermes-push (it carries that plugin's registered pho
   (for example ntfy) delivers it.
 - Room activity: it keeps what each bot in a group room is doing right now (running a tool, thinking, writing, waiting
   for your OK) from Hermes's `on_room_member_activity` hook, for the app to show; see `activity.py`.
+- Kanban approvals: in a kanban worker, which runs headless and would refuse every command that needs an OK, it asks the
+  person through the app instead, in the chat the card came from; see `kanban_approvals.py`.
 
 Nothing here holds the bot up: see `hooks.py`.
 """
@@ -41,5 +43,13 @@ def register(ctx) -> None:
         watched.append("on_room_member_activity")
     except Exception as error:
         log.info("hermes-bot-mobile: no live room activity on this Hermes (%s)", error)
+
+    # Only in a kanban worker (the dispatcher's `hermes chat -q`): anywhere else it does nothing.
+    try:
+        from .kanban_approvals import WorkerRelay
+
+        WorkerRelay().install()
+    except Exception as error:
+        log.info("hermes-bot-mobile: kanban approvals not relayed (%s)", error)
 
     log.info("hermes-bot-mobile: watching %s", ", ".join(watched))

@@ -29,6 +29,8 @@ class Setup(unittest.TestCase):
         self.routines: dict[str, str] = {}
         # Kanban cards as Hermes's board would answer (see hooks.kanban_card).
         self.cards: dict[str, dict] = {}
+        # What a kanban worker's approvals are about (see kanban_approvals.worker_context): None outside a worker.
+        self.worker = None
         self.hooks = hooks.PushHooks(
             store=self.store,
             pusher=notify.Pusher(self.store, post=self.net, background=False),
@@ -38,6 +40,7 @@ class Setup(unittest.TestCase):
             title=lambda chat: self.titles.get(chat, ""),
             routine=lambda session: self.routines.get(session, ""),
             card=lambda board, task: self.cards.get(task),
+            worker=lambda: self.worker,
         )
 
     def tearDown(self):
@@ -105,6 +108,19 @@ class Approvals(Setup):
         self.assertEqual(message["type"], "Approvals")
         self.assertEqual(message["url"], "hermesbot://bot/juniper")
         self.assertNotIn("rm -rf", json.dumps(message))
+
+    def test_a_kanban_workers_approval_opens_the_chat_it_shows_in_and_names_the_card(self):
+        self.worker = {"task": "t_1", "title": "Clear the build cache", "profile": "orion", "chat": "20261020_101500_0dc184", "created_by": "orion"}
+        self.ask(session_key="default")
+        (message,) = self.sent()
+        self.assertEqual(message["title"], "Juniper · Clear the build cache")
+        self.assertEqual(message["body"], "Needs your OK: recursive delete")
+        self.assertEqual(message["url"], "hermesbot://bot/orion?chat=20261020_101500_0dc184")
+
+        # Another bot asked for the card: the working bot's main chat.
+        self.worker = {**self.worker, "task": "t_2", "chat": "", "created_by": "harbor"}
+        self.ask(session_key="default", command="rm -rf /tmp/other", pattern_key="rm-other")
+        self.assertEqual(self.sent()[-1]["url"], "hermesbot://bot/orion")
 
     def test_a_terminal_or_automatic_approval_is_not_for_the_phone(self):
         for surface in ("cli", "smart", "mcp-elicitation", "transport:x"):

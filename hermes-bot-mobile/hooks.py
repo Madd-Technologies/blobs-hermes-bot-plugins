@@ -12,9 +12,10 @@ import re
 from pathlib import Path
 
 try:
-    from . import notify
+    from . import kanban_approvals, notify
     from .store import DeviceStore
 except ImportError:  # the tests import the modules flat
+    import kanban_approvals  # type: ignore[no-redef]
     import notify  # type: ignore[no-redef]
     from store import DeviceStore  # type: ignore[no-redef]
 
@@ -237,7 +238,7 @@ def question_text(args) -> str:
 
 
 class PushHooks:
-    def __init__(self, store: DeviceStore | None = None, pusher: notify.Pusher | None = None, profile=current_profile, name=bot_name, context=turn_context, title=chat_title, routine=routine_name, card=kanban_card):
+    def __init__(self, store: DeviceStore | None = None, pusher: notify.Pusher | None = None, profile=current_profile, name=bot_name, context=turn_context, title=chat_title, routine=routine_name, card=kanban_card, worker=kanban_approvals.worker_context):
         self.store = store or DeviceStore()
         self.pusher = pusher or notify.Pusher(self.store)
         self.dedupe = notify.Dedupe()
@@ -247,6 +248,7 @@ class PushHooks:
         self._title = title
         self._routine = routine
         self._card = card
+        self._worker = worker
 
     # -- helpers -----------------------------------------------------------------------------------------------
 
@@ -263,7 +265,7 @@ class PushHooks:
 
         return {"chat": chat_id(context["chat"], *ids)}
 
-    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None, slot: str = "", profile: str = "") -> None:
+    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None, slot: str = "", profile: str = "", about: str = "") -> None:
         """Push one thing for the person: an approval, a question, a routine that broke, a blocked kanban card, or (only for
         a bot set to `all`) the start of a reply. That a turn finished or a routine ran is never pushed: it shows on Home and in the bot's
         routines, and a buzz for it is noise. `slot` is what a newer push of the same kind replaces (a chat's last reply)."""
@@ -286,7 +288,7 @@ class PushHooks:
         body = notify.lines(kind, detail=detail, failed=failed)
         target = target or {}
         # Which chat it is about, by its title, so the notification makes sense without opening it.
-        about = self._title(target.get("chat", "")) if target.get("chat") else ""
+        about = about or (self._title(target.get("chat", "")) if target.get("chat") else "")
         title = f"{self._name(profile)} · {about}" if about else self._name(profile)
         url = notify.INBOX if target.get("inbox") else notify.link(profile, chat=target.get("chat", ""), room=target.get("room", ""), page=target.get("page", ""))
         self.pusher.send(kind, notify.build(kind, profile=profile, bot=title, body=body, key=slot or key, url=url))
@@ -302,6 +304,17 @@ class PushHooks:
         session_key = str(kw.get("session_key") or "")
         command = str(kw.get("command") or "")
         key = pending_request_id(session_key, command) or f"{session_key}:{kw.get('pattern_key')}"
+        worker = self._worker()
+
+        if worker:
+            # A kanban worker's approval (see kanban_approvals.py): it shows in the chat the card came from, or the working
+            # bot's main chat, and the push says which card it is for.
+            chat = worker.get("chat", "")
+            title = notify.tidy(notify.redact(worker.get("title") or ""), 40)
+            self._emit("approval", key, detail=notify.describe(kw.get("description", ""), command), session=chat, target={"chat": chat}, profile=worker.get("profile", ""), about=title)
+
+            return
+
         # In the dashboard the session key is the chat's persistent id; in the messaging gateway it is not, and then
         # the chat comes from the turn's context.
         target = self._target(session_key, kw.get("session_id"))
