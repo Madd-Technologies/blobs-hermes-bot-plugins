@@ -15,12 +15,18 @@ turned away.
    to ask, what to write down, and who to call. The brief is checked and stored, and you get a push.
 3. You read the brief in the app, tick every flagged fact (an address, another phone number, anything on your never-share
    list) or strike it out, and approve. Nothing is dialed before that.
-4. The call service calls each number in turn. Every call opens with "Hi, this is an AI assistant calling for <your
-   name>. This call is transcribed." Menus get keypad tones, hold music gets silence, and a voicemail gets a short
-   scripted message. A call screener (Google Voice, Pixel's Call Screen, the iPhone's) gets the opening line, and the call
-   waits for the person to pick up.
+4. The call service calls each number in turn. Every call opens with its opening line, by default "Hi, this is an AI
+   assistant calling for <your name>. This call is transcribed." (see `opener` below), then says why it's calling.
+   Menus get keypad tones, hold music gets silence, and a voicemail gets a short scripted message. A call screener
+   (Google Voice, Pixel's Call Screen, the iPhone's) gets the opening line, and the call waits for the person to pick up.
 5. When the errand is done, the bot gets one fixed line in its main chat and reads the results with `phone_call_report`.
    You get one push.
+
+**Your own opening line, and the law.** The law where you are, and where the person you call is, may require a call to
+say that the caller is an AI, or that the call is recorded or transcribed (for example, places that need everyone's
+consent to record or transcribe a call, and rules on AI or automated callers). The standard opening says both. If you set
+your own, making sure it does what those laws require is yours. Whatever the opening says, the voice answers truthfully
+when asked: it says it is an AI if asked whether it is one, and whether the call is transcribed if asked that.
 
 ## What the caller can and can't say
 
@@ -160,6 +166,7 @@ like a robocaller, so some calls are turned away before they ring, mostly to mob
 | Setting | Default | |
 | --- | --- | --- |
 | `name` | | The name the caller gives ("calling for Alex"). Required. |
+| `opener` | `""` | Your own opening line, spoken word for word before the reason for the call (up to 200 characters; `{name}` is your name). Empty uses the standard one, which says it is an AI and, with `transcripts` on, that the call is transcribed. |
 | `never_share` | `[]` | Labeled values a call must not say (a home address, a personal cell). Stored here, never sent back to the app, only a hint. |
 | `do_not_call` | `[]` | Numbers never dialed. |
 | `bots` | `["default"]` | Bots that may ask for calls. |
@@ -167,7 +174,7 @@ like a robocaller, so some calls are turned away before they ring, mostly to mob
 | `hours` | `[8, 21]` | Calling hours, in the server's local time. |
 | `daily_cap` | `10` | Calls started per 24 hours. |
 | `max_minutes` / `hold_minutes` | `20` / `15` | Per call, and on hold. |
-| `transcripts` | `true` | Keep transcripts, and say so in the opening. |
+| `transcripts` | `true` | Keep transcripts, and say so in the standard opening. |
 | `ask_owner` | `true` | Let a call ask you a question it can't answer from the brief. |
 | `public_url` / `port` | `""` / `8796` | Where Twilio reaches the service, and where it listens locally. |
 

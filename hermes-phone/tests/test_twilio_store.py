@@ -124,6 +124,16 @@ class Store(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(S.SettingsError):
                 self.store.update_settings(bad)
 
+    def test_the_opening_line_is_checked(self):
+        self.assertEqual(self.store.settings()["opener"], "")
+        self.store.update_settings({"opener": "  Hi, I'm calling   for {name}. "})
+        self.assertEqual(self.store.settings()["opener"], "Hi, I'm calling for {name}.")
+        self.store.update_settings({"opener": ""})
+        self.assertEqual(self.store.settings()["opener"], "", "an empty line goes back to the standard one")
+        for bad in ({"opener": "x" * 201}, {"opener": 5}):
+            with self.subTest(bad=bad), self.assertRaises(S.SettingsError):
+                self.store.update_settings(bad)
+
     def test_files_are_private(self):
         self.store.update_settings({"never_share": [{"label": "Home", "value": "12 Orchard Lane"}]})
         mode = stat.S_IMODE(os.stat(self.store.folder / "settings.json").st_mode)

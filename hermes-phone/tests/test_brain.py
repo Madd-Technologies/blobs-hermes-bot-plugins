@@ -22,7 +22,7 @@ def tearDownModule():
     LOOP.close()
 
 class Harness:
-    def __init__(self, ask_owner=True, answer="Yes, the lid is exposed.", max_minutes=20, hold_minutes=15, transcripts=True):
+    def __init__(self, ask_owner=True, answer="Yes, the lid is exposed.", max_minutes=20, hold_minutes=15, transcripts=True, opener=""):
         brief, _ = B.check(septic(), SETTINGS, CALLBACK)
         self.t = [1000.0]
         self.grok, self.twilio, self.saved, self.hung, self.asked = [], [], [], [], []
@@ -43,7 +43,7 @@ class Harness:
 
         ports = M.Ports(grok=grok, twilio=twilio, hang_up=hang_up, ask_owner=ask, save=self.saved.append, clock=lambda: self.t[0])
         setup = M.Setup(brief=brief, call=brief["calls"][0], name="Alex", callback=CALLBACK, ask_owner=ask_owner,
-                        transcripts=transcripts, max_minutes=max_minutes, hold_minutes=hold_minutes, never_share=SETTINGS["never_share"])
+                        transcripts=transcripts, opener=opener, max_minutes=max_minutes, hold_minutes=hold_minutes, never_share=SETTINGS["never_share"])
         self.brain = M.Brain(setup, ports)
 
     def run(self, coro):
@@ -115,6 +115,14 @@ class Greeting(unittest.TestCase):
         h.twilio_event("mark", mark={"name": "opening"})
         self.assertEqual(h.types()[-2:], ["input_audio_buffer.clear", "session.update"])
         self.assertEqual(h.vad(), [{"type": "server_vad"}])
+
+    def test_the_persons_own_opening_line_is_spoken_word_for_word(self):
+        h = Harness(opener="Hi, I'm calling for {name}.")
+        h.start()
+        h.media(LOUD, 0.6)
+        h.media(QUIET, 0.8)
+        self.assertEqual(len(h.forced()), 1)
+        self.assertTrue(h.forced()[0].startswith("Hi, I'm calling for Alex. I'm calling"), h.forced()[0])
 
     def test_the_call_goes_on_if_the_opening_mark_never_comes_back(self):
         h = Harness()
