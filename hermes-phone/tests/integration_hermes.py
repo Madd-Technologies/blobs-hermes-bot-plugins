@@ -33,7 +33,7 @@ os.environ["HERMES_HOME"] = str(home)
 (home / "plugins").mkdir()
 shutil.copytree(PLUGIN, home / "plugins" / "hermes-phone", ignore=shutil.ignore_patterns("tests", "__pycache__"))
 (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-phone\n")
-(home / ".env").write_text("TWILIO_ACCOUNT_SID=ACnotreal\nTWILIO_AUTH_TOKEN=not-real\nTWILIO_PHONE_NUMBER=+1 (202) 555-0123\n")
+(home / ".env").write_text("HERMES_PHONE_TWILIO_ACCOUNT_SID=ACnotreal\nHERMES_PHONE_TWILIO_AUTH_TOKEN=not-real\nHERMES_PHONE_TWILIO_PHONE_NUMBER=+1 (202) 555-0123\n")
 #: Hermes's CLI and the call service run on this interpreter, with the checkout first on the path.
 child_env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(CHECKOUT), os.environ.get("PYTHONPATH", "")]).rstrip(os.pathsep)}
 
@@ -71,7 +71,7 @@ base = "/api/plugins/hermes-phone"
 
 status = client.get(f"{base}/status").json()
 print("status:", status)
-assert status["version"] == "0.1.1" and status["line"] == {"set": True, "number": "…23"}, status
+assert status["version"] == "0.1.2" and status["line"] == {"set": True, "number": "…23"}, status
 
 settings = client.put(f"{base}/settings", json={"name": "Alex", "never_share_add": [{"label": "Home address", "value": "12 Orchard Lane, Pinecrest"}],
                                                 "test_numbers": ["202-555-0101"]}).json()

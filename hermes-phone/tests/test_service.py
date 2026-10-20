@@ -20,7 +20,7 @@ import twilio_api as T  # noqa: E402
 import ulaw  # noqa: E402
 
 PUBLIC = "https://node.example.ts.net:8443"
-ENV = "TWILIO_ACCOUNT_SID=AC1\nTWILIO_AUTH_TOKEN=tok\nTWILIO_PHONE_NUMBER=+12025550123\n"
+ENV = "HERMES_PHONE_TWILIO_ACCOUNT_SID=AC1\nHERMES_PHONE_TWILIO_AUTH_TOKEN=tok\nHERMES_PHONE_TWILIO_PHONE_NUMBER=+12025550123\n"
 QUIET = base64.b64encode(bytes([ulaw.SILENCE]) * 160).decode()
 LOUD = ulaw.frames(ulaw.tone("5"))[0]
 

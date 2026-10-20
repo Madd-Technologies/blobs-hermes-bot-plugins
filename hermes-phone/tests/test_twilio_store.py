@@ -89,12 +89,21 @@ class Rest(unittest.TestCase):
     def test_env_and_credentials(self):
         with tempfile.TemporaryDirectory() as folder:
             env = Path(folder) / ".env"
-            env.write_text("# comment\nexport TWILIO_ACCOUNT_SID=AC1\nTWILIO_AUTH_TOKEN='tok'\nTWILIO_PHONE_NUMBER=\"+12025550123\"\n")
+            env.write_text("# comment\nexport HERMES_PHONE_TWILIO_ACCOUNT_SID=AC1\nHERMES_PHONE_TWILIO_AUTH_TOKEN='tok'\n"
+                           "HERMES_PHONE_TWILIO_PHONE_NUMBER=\"+12025550123\"\n")
             creds = T.credentials(T.read_env(env))
             self.assertEqual((creds["account_sid"], creds["auth_token"], creds["number"], creds["api_key"]), ("AC1", "tok", "+12025550123", ""))
-            self.assertIsNone(T.credentials({"TWILIO_ACCOUNT_SID": "AC1"}))
-            written = {"TWILIO_ACCOUNT_SID": "AC1", "TWILIO_AUTH_TOKEN": "tok", "TWILIO_PHONE_NUMBER": "+1 (202) 555-0123"}
-            self.assertEqual(T.credentials(written)["number"], "+12025550123")
+            self.assertIsNone(T.credentials({"HERMES_PHONE_TWILIO_ACCOUNT_SID": "AC1"}))
+            written = {"HERMES_PHONE_TWILIO_ACCOUNT_SID": "AC1", "HERMES_PHONE_TWILIO_AUTH_TOKEN": "tok", "HERMES_PHONE_TWILIO_PHONE_NUMBER": "+1 (202) 555-0123",
+                       "HERMES_PHONE_TWILIO_API_KEY": "SK1", "HERMES_PHONE_TWILIO_API_SECRET": "keysecret"}
+            self.assertEqual((T.credentials(written)["number"], T.credentials(written)["api_key"], T.credentials(written)["api_secret"]),
+                             ("+12025550123", "SK1", "keysecret"))
+
+    def test_hermes_own_twilio_names_are_never_read(self):
+        # Hermes's SMS channel and telephony skill read these; keys under them are not this plugin's.
+        shared = {"TWILIO_ACCOUNT_SID": "AC1", "TWILIO_AUTH_TOKEN": "tok", "TWILIO_PHONE_NUMBER": "+12025550123"}
+        self.assertIsNone(T.credentials(shared))
+        self.assertIsNone(T.credentials(shared | {"HERMES_PHONE_TWILIO_ACCOUNT_SID": "AC2"}))
 
 
 class Store(unittest.TestCase):

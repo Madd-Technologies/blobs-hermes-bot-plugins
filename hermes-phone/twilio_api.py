@@ -169,10 +169,18 @@ def read_env(path) -> Dict[str, str]:
     return out
 
 
+#: The plugin's keys carry its own prefix (HERMES_PHONE_TWILIO_ACCOUNT_SID and so on), never Hermes's plain TWILIO_* names:
+#: Hermes's SMS channel turns itself on from those and can then text from the number with no approval, and its telephony
+#: skill calls with them. Plain TWILIO_* keys are never read here.
+PREFIX = "HERMES_PHONE_"
+#: The names after the prefix: the three this line needs, then an optional API key for REST calls.
+NAMES = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER", "TWILIO_API_KEY", "TWILIO_API_SECRET")
+
+
 def credentials(env: Mapping[str, str]) -> Optional[Dict[str, str]]:
     """The Twilio settings this line needs, or None when the server doesn't have them yet."""
-    sid, token, number = (env.get(k, "").strip() for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"))
+    sid, token, number, api_key, api_secret = (env.get(PREFIX + name, "").strip() for name in NAMES)
     if not (sid and token and number):
         return None
     return {"account_sid": sid, "auth_token": token, "number": dialing.try_normalize(number) or number,
-            "api_key": env.get("TWILIO_API_KEY", "").strip(), "api_secret": env.get("TWILIO_API_SECRET", "").strip()}
+            "api_key": api_key, "api_secret": api_secret}
