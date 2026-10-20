@@ -12,6 +12,9 @@ Every write to the table is inside `server_requests.py`, through the module's ow
 import the module rather than the table, so the swap is seen everywhere. Prompts the messaging gateway asks (Telegram and
 the like) live in that process, and with `dashboard.turn_isolation` on, a turn's prompts live in its compute-host child:
 neither is seen here, and the app keeps its slow check for those servers.
+
+A kanban worker's approvals wait in another process altogether: its copy of this plugin writes them to files
+(`kanban_approvals.py`), and the watch looks at that folder every second, so they go out in the same event under `kanban`.
 """
 
 from __future__ import annotations
@@ -32,6 +35,9 @@ HUMAN = ("approval", "clarify", "sudo", "secret", "vault.unlock_prompt", "vault.
 
 #: Changes that land this close together go out as one event: a batch of questions, or a prompt answered as the next opens.
 COALESCE_S = 0.05
+
+#: How often the watch looks at the kanban workers' approvals, which have no event of their own.
+KANBAN_POLL_S = 1.0
 
 
 class WatchedTable(dict):
@@ -134,16 +140,22 @@ class NeedsYou:
         broadcast: Optional[Callable[[dict], None]] = None,
         session_of: Optional[Callable[[str], dict]] = None,
         coalesce_s: float = COALESCE_S,
+        kanban=None,
+        kanban_poll_s: float = KANBAN_POLL_S,
     ):
         self._requests = requests or _hermes_requests
         self._broadcast = broadcast or _hermes_broadcast
         self._session_of = session_of or _hermes_session
         self._coalesce_s = coalesce_s
+        #: The kanban workers' approvals (`kanban_approvals.KanbanApprovals`), or None.
+        self._kanban = kanban
+        self._kanban_poll_s = kanban_poll_s
+        self._kanban_seen: tuple = ()
         self._dirty = threading.Event()
         self._lock = threading.Lock()
         self._module = None
         self._version = 0
-        self._last: tuple = ()
+        self._last: tuple = ((), ())
         self._thread: Optional[threading.Thread] = None
 
     @property
@@ -183,23 +195,51 @@ class NeedsYou:
 
     def snapshot(self) -> dict:
         """What waits on the person now, read fresh. `version` counts the changes pushed so far by this process."""
-        return {"live": self.live, "version": self._version, "requests": self._read()}
+        return self._body(self.live, self._read(), self._read_kanban())
+
+    def poke(self) -> None:
+        """Something changed that the watch can't see at once (an answer to a kanban approval): look now."""
+        self._dirty.set()
 
     def publish(self) -> bool:
         """Pushes the list if it changed since the last push. Only the watch thread calls it, so a read for the route
         never hides a change from it. True when something was sent."""
+        if self._kanban is not None:
+            # Read before the list, so a change landing in between is seen on the next look.
+            self._kanban_seen = self._kanban.signature()
+
         requests = self._read()
+        kanban = self._read_kanban()
         # A batch of questions answered one by one changes only its locked answers: that is a change too.
-        key = tuple((entry["id"], tuple(sorted((entry["params"].get("answers") or {}).items()))) for entry in requests)
+        key = (tuple((entry["id"], tuple(sorted((entry["params"].get("answers") or {}).items()))) for entry in requests), tuple(entry["id"] for entry in kanban))
 
         if key == self._last:
             return False
 
         self._last = key
         self._version += 1
-        self._broadcast({"live": True, "version": self._version, "requests": requests})
+        self._broadcast(self._body(True, requests, kanban))
 
         return True
+
+    def _body(self, live: bool, requests: list[dict], kanban: list[dict]) -> dict:
+        body = {"live": live, "version": self._version, "requests": requests}
+
+        if self._kanban is not None:
+            body["kanban"] = kanban
+
+        return body
+
+    def _read_kanban(self) -> list[dict]:
+        if self._kanban is None:
+            return []
+
+        try:
+            return self._kanban.pending()
+        except Exception:
+            log.debug("hermes-bot-mobile: could not read the kanban approvals", exc_info=True)
+
+            return []
 
     def _read(self) -> list[dict]:
         module = self._module
@@ -233,9 +273,11 @@ class NeedsYou:
 
     def _run(self) -> None:
         while True:
-            self._dirty.wait()
-            time.sleep(self._coalesce_s)
-            self._dirty.clear()
+            if self._dirty.wait(self._kanban_poll_s if self._kanban is not None else None):
+                time.sleep(self._coalesce_s)
+                self._dirty.clear()
+            elif self._kanban.signature() == self._kanban_seen:
+                continue
 
             try:
                 self.publish()

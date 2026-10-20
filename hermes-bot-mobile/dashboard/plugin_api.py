@@ -1,7 +1,7 @@
 """The phone app's side of hermes-bot-mobile: register a device, change how loud each bot is, send a test, read what
 each bot in a group room is doing right now, set up where a bot's commands run (its SSH key and a connection check),
 restart this dashboard (and the gateway) from the app, Taildrop a file from this server to one of the person's devices,
-and push what waits on the person (Needs you) to the app the moment it changes.
+push what waits on the person (Needs you) to the app the moment it changes, and answer a kanban worker's approval.
 
 Mounted by `hermes serve` under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's own sign-in, so only someone
 who can already use the server can reach it. Hermes imports this file on its own, apart from the plugin package,
@@ -109,6 +109,12 @@ def _needs_you_module():
     return importlib.import_module(f"{_PACKAGE}.needs_you")
 
 
+def _kanban_module():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.kanban_approvals")
+
+
 #: The one watch of this dashboard's prompts: it swaps Hermes's open-requests table once per process.
 _NEEDS_YOU = None
 _NEEDS_YOU_LOCK = threading.Lock()
@@ -119,7 +125,7 @@ def _needs_you():
 
     with _NEEDS_YOU_LOCK:
         if _NEEDS_YOU is None:
-            _NEEDS_YOU = _needs_you_module().NeedsYou()
+            _NEEDS_YOU = _needs_you_module().NeedsYou(kanban=_kanban_module().KanbanApprovals())
 
         return _NEEDS_YOU
 
@@ -228,6 +234,10 @@ class RestartIn(BaseModel):
     include_gateway: bool = False
 
 
+class KanbanAnswerIn(BaseModel):
+    choice: Literal["once", "session", "always", "deny"]
+
+
 class TaildropIn(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -331,12 +341,31 @@ def test(body: TestIn):
 @router.get("/needs-you")
 def needs_you() -> dict:
     """Every prompt waiting on the person across the bots this dashboard serves: `{live, version, requests: [{id, method,
-    session_id, session_key, profile, title, created_at, params}]}`, oldest first. `params` is the prompt as Hermes sent it (an
-    approval's command already redacted). With `live`, the same body is pushed as the `/api/ws` event
-    `plugin.hermes-bot-mobile.needs_you.changed` whenever it changes, so the app reads this only when it connects."""
+    session_id, session_key, profile, title, created_at, params}], kanban: [...]}`, oldest first. `params` is the prompt as
+    Hermes sent it (an approval's command already redacted). `kanban` is the approvals kanban workers wait on: `{id,
+    profile, chat, task: {id, title, board, created_by}, command, description, allow_session, allow_permanent,
+    created_at}`, where `chat` is the chat to show it in ("" for the bot's main chat). With `live`, the same body is pushed
+    as the `/api/ws` event `plugin.hermes-bot-mobile.needs_you.changed` whenever it changes, so the app reads this only when
+    it connects."""
     start_needs_you()
 
     return _needs_you().snapshot()
+
+
+@router.post("/kanban-approvals/{request_id}")
+def answer_kanban_approval(request_id: str, body: KanbanAnswerIn):
+    """Answers an approval a kanban worker waits on: `{answered: true, id, choice}`; 404 when it no longer waits (timed out,
+    or the worker stopped), 409 when it was answered already, 400 for a choice it doesn't offer. The worker picks the
+    answer up within a second."""
+    try:
+        result = _kanban_module().KanbanApprovals().answer(request_id, body.choice)
+    except _kanban_module().Refusal as refusal:
+        return _refusal(refusal)
+
+    if start_needs_you():
+        _needs_you().poke()
+
+    return result
 
 
 @router.get("/rooms/{room_id}/activity")
