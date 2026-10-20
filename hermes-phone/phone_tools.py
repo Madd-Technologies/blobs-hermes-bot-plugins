@@ -47,7 +47,7 @@ PHONE_CALL_SCHEMA = {
         "title": {"type": "string", "description": "A few words for the errand, e.g. \"Septic pump-out quotes\"."},
         "mode": {"type": "string", "enum": list(B.MODES), "description": "quote: prices only, never book. book: may book within accept. ask: questions or a message only."},
         "goal": {"type": "string", "description": "One sentence: what the call should get done."},
-        "opening": {"type": "string", "description": "Why you're calling, as said right after \"Hi, this is an AI assistant calling for <name>.\" No private details."},
+        "opening": {"type": "string", "description": "Why you're calling, as said right after the call's opening line (who is calling). No private details."},
         "facts": {"type": "array", "items": _FACT, "description": "What the other party may hear, one fact each."},
         "questions": {"type": "array", "items": {"type": "string"}, "description": "What to ask, in order of importance."},
         "record": {"type": "array", "items": {"type": "object", "properties": {"key": {"type": "string"}, "label": {"type": "string"}}, "required": ["key"]},

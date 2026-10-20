@@ -1,6 +1,7 @@
 """What the Grok voice on a call is told, and the tools it gets: five narrow ones, none of which reaches the bot.
 
-The voice knows the brief and nothing else. Its first sentence (the AI disclosure) is spoken for it, word for word, with
+The voice knows the brief and nothing else. Its first sentence (the opening line: the standard AI disclosure, or the person's
+own) is spoken for it, word for word, with
 `force_message`; so is a voicemail. Changes during the call (an answer from the person, "time is almost up") arrive as a
 new `session.update` of the instructions, never as words that sound like they came from the other party.
 """
@@ -47,7 +48,8 @@ Only the call brief below. You know nothing else about {name}, and you cannot lo
 - Never speak stage directions or describe what you are doing: never say things like "(silence)", "holding" or "waiting".
 
 # The conversation
-- Your first sentence is spoken for you: it says you are an AI assistant calling for {name}, and why. Don't repeat it.
+- Your first sentence is spoken for you: it says who is calling and why. Don't repeat it.
+- If they ask whether you're an AI, a robot or a recording, say yes: you're an AI assistant calling for {name}. Never claim to be a person.
 - Then get the goal done: ask the questions one or two at a time, and listen.
 {ask_owner}- If they ask whether the call is recorded: {recorded}
 - Before wrapping up, ask any question from the brief they haven't answered yet.
@@ -68,15 +70,25 @@ ASK_OWNER_RULE = (
 )
 
 
-def disclosure(name: str, transcribed: bool) -> str:
+def disclosure(name: str, transcribed: bool, opener: str = "") -> str:
+    """Who is calling: the person's own opening line when they set one (`{name}` in it is their name), else the standard
+    one, which says it is an AI assistant and, when it is kept, that the call is transcribed. Whether a call must say so is
+    up to the law where the person and the one called are; the setting says so where it is changed."""
+    own = " ".join(opener.split()).replace("{name}", name)
+
+    if own:
+        return own if own[-1] in ".!?" else f"{own}."
+
     return f"Hi, this is an AI assistant calling for {name}." + (" This call is transcribed." if transcribed else "")
 
 
-def opening(brief: Dict[str, Any], name: str, transcribed: bool) -> str:
-    """The first words of the call, spoken word for word: who is calling, that it's an AI, and why."""
-    why = brief.get("opening") or f"I'm calling about {brief['title'][:1].lower()}{brief['title'][1:]}."
+def why(brief: Dict[str, Any]) -> str:
+    return brief.get("opening") or f"I'm calling about {brief['title'][:1].lower()}{brief['title'][1:]}."
 
-    return f"{disclosure(name, transcribed)} {why}"
+
+def opening(brief: Dict[str, Any], name: str, transcribed: bool, opener: str = "") -> str:
+    """The first words of the call, spoken word for word: who is calling, then why."""
+    return f"{disclosure(name, transcribed, opener)} {why(brief)}"
 
 
 def spoken_number(number: str) -> str:
@@ -85,12 +97,13 @@ def spoken_number(number: str) -> str:
     return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else ""
 
 
-def voicemail(brief: Dict[str, Any], name: str, callback: str, transcribed: bool) -> str:
+def voicemail(brief: Dict[str, Any], name: str, callback: str, transcribed: bool, opener: str = "") -> str:
     back = spoken_number(callback) if B.CALLBACKS else ""
-    why = brief.get("opening") or f"I'm calling about {brief['title'][:1].lower()}{brief['title'][1:]}."
     after = f"Please call back at {back}. " if back else f"{name} will call you back. "
+    # A message is not transcribed as a conversation is, so the standard one leaves that sentence out.
+    hello = disclosure(name, False, opener)
 
-    return f"Hi, this is an AI assistant calling for {name}. {why} {after}Thank you."
+    return f"{hello} {why(brief)} {after}Thank you."
 
 
 def instructions(brief: Dict[str, Any], call: Dict[str, Any], name: str, ask_owner: bool,

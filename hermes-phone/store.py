@@ -2,7 +2,7 @@
 dashboard routes, inside Hermes) and the call service (its own process). Every write is atomic and locked (fcntl), and the
 folder and files are private to the user: the never-share list holds the very values a call must not say.
 
-- `settings.json`: the name to use on calls, the never-share list, limits, and where Twilio reaches the service.
+- `settings.json`: the name to use on calls, the opening line, the never-share list, limits, and where Twilio reaches the service.
 - `errands/<id>.json`: one errand per file: the brief, the person's decision, and each call's progress and outcome.
 - `ledger.json`: numbers this line has called (for callbacks, in a later version), and recent call starts (the daily cap).
 - `service.json`: the call service's heartbeat.
@@ -27,6 +27,9 @@ except ImportError:  # pragma: no cover - Hermes servers are Linux or macOS
 
 DEFAULTS: Dict[str, Any] = {
     "name": "",
+    # The call's first sentence, spoken word for word before the reason for the call. Empty: the standard one, which says
+    # it is an AI assistant (and that the call is transcribed, when it is). The person sets their own at their own risk.
+    "opener": "",
     "never_share": [],
     "do_not_call": [],
     "bots": ["default"],
@@ -43,6 +46,8 @@ DEFAULTS: Dict[str, Any] = {
     "port": 8796,
 }
 STAGES = ("test", "live")
+#: The longest opening line: one or two spoken sentences.
+OPENER_MAX = 200
 PENDING_HOURS = 24
 HEARTBEAT_S = 10
 LOG_KEEP = 200
@@ -131,6 +136,8 @@ def check_settings(change: Dict[str, Any]) -> Dict[str, Any]:
         if value is None:
             continue
         if key == "name" and isinstance(value, str) and len(value.strip()) <= 60:
+            out[key] = " ".join(value.split())
+        elif key == "opener" and isinstance(value, str) and len(" ".join(value.split())) <= OPENER_MAX:
             out[key] = " ".join(value.split())
         elif key in ("transcripts", "ask_owner") and isinstance(value, bool):
             out[key] = value

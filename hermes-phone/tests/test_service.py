@@ -298,6 +298,27 @@ class Stream(Base):
             with self.client.websocket_connect("/twilio/stream/not-a-token", headers={"x-twilio-signature": T.signature("tok", self.url("not-a-token"), {})}) as ws:
                 ws.receive_json()
 
+    def test_the_opening_line_from_settings_is_what_the_call_says(self):
+        self.store.update_settings({"opener": "Hi, I'm calling for {name}."})
+        errand, call = self.live_call()
+        token = call["token"]
+        with self.client.websocket_connect(f"/twilio/stream/{token}", headers={"x-twilio-signature": T.signature("tok", self.url(token), {})}) as ws:
+            ws.send_json({"event": "connected"})
+            ws.send_json({"event": "start", "start": {"streamSid": "MZ1", "callSid": "CA1"}})
+            for payload, seconds in ((LOUD, 0.5), (QUIET, 0.9)):
+                for _ in range(int(seconds / 0.02)):
+                    self.t[0] += 0.02
+                    ws.send_json({"event": "media", "media": {"payload": payload}})
+            ws.receive_json()
+            ws.send_json({"event": "stop"})
+            try:
+                ws.receive_json()
+            except WebSocketDisconnect:
+                pass
+
+        forced = [e for e in self.grok.sent if e["type"] == "conversation.item.create" and e["item"]["type"] == "force_message"]
+        self.assertTrue(forced[0]["item"]["content"][0]["text"].startswith("Hi, I'm calling for Alex. "), forced[0])
+
     def test_an_answered_call_end_to_end(self):
         errand, call = self.live_call()
         token = call["token"]

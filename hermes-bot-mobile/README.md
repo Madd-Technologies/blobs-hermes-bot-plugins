@@ -64,6 +64,29 @@ false on a Hermes without the table, and the app keeps its own slow check there.
 gateway asks (Telegram and the like, answered there), and with `dashboard.turn_isolation` on, a turn's prompts, which
 live in its compute-host child. Routines never prompt.
 
+## Kanban approvals
+
+A kanban card is worked by a headless worker: Hermes's dispatcher starts `hermes -p <assignee> chat -q "work kanban task
+<id>"`. Hermes counts a `-q` run as having nobody to ask, so on its own every command in a worker that needs an OK is
+refused on the spot (`approvals.single_query_mode: deny`), and the worker gives up on the card or blocks it. Since 0.1.9,
+this plugin asks the person instead (`kanban_approvals.py`), in every profile that has a copy of it:
+
+- In a worker (the dispatcher sets `HERMES_KANBAN_TASK`), the approval gate counts the worker as having someone to ask,
+  and a session without a notify callback falls back to this plugin. So Hermes's own gateway round-trip runs: the agent
+  thread waits, with the heartbeats that keep the card's claim; Hermes keeps "for this session" and "always"; a deny is a
+  hard stop, and silence is not consent. A worker waits up to 30 minutes (a longer `approvals.timeout` stands), within the
+  card's own runtime limit.
+- The waiting approval is written to `~/.hermes/hermes-bot-mobile/kanban-approvals/<request id>.json` (the command
+  already redacted by Hermes). The dashboard's copy reads that folder every second and sends it with Needs you under
+  `kanban`, and the phone gets an approval push. `POST /kanban-approvals/{id}` writes the answer next to it; the worker
+  takes it within half a second, and however the wait ends, the files go. A record whose worker is gone is cleared away.
+- Where it shows: in the chat the card was created from, when the bot working the card created it there; otherwise
+  (another bot asked for it, or the card came from the dashboard or the CLI) in that bot's main chat. The card says
+  which task it is for, and who asked when another bot did.
+
+`approvals.single_query_mode: approve` still approves without asking, and yolo or `approvals.mode: off` never ask. A
+worker whose profile has no copy of this plugin, or a Hermes without the parts it relies on, keeps Hermes's own refusal.
+
 ## Where a bot runs
 
 <!-- Kept free of the trusted-keys file's name: Hermes's install scan reads an instruction to add to it as a backdoor. -->
@@ -211,7 +234,8 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `PUT /settings` | each bot on or `off` (`all` and `needs_you` both mean on) |
 | `PUT /presence` | what the phone has on screen (no pushes for it) |
 | `POST /test` | send a test push |
-| `GET /needs-you` | `{live, version, requests: [{id, method, session_id, session_key, profile, title, created_at, params}]}`, oldest first; pushed as `plugin.hermes-bot-mobile.needs_you.changed` when it changes |
+| `GET /needs-you` | `{live, version, requests: [{id, method, session_id, session_key, profile, title, created_at, params}], kanban: [{id, profile, chat, task: {id, title, board, created_by}, command, description, allow_session, allow_permanent, created_at}]}`, oldest first; pushed as `plugin.hermes-bot-mobile.needs_you.changed` when it changes |
+| `POST /kanban-approvals/{id}` | `{choice: once\|session\|always\|deny}`: answers a kanban worker's approval, `{answered: true, id, choice}`; 404 when it no longer waits, 409 answered already, 400 a choice it doesn't offer |
 | `GET /rooms/{room_id}/activity` | `{members: {member_id: {phase, tool, since}}, now}` |
 | `GET /runs-on/key?profile=` | the bot's public SSH line (`null` before one is made) and its private key's path |
 | `POST /runs-on/key` | `{profile}`: makes the bot's key pair if it has none |
@@ -227,7 +251,8 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 ## Data
 
 `~/.hermes/hermes-bot-mobile/` (the Hermes root, not a profile: one phone, many bots): `devices.json`, `settings.json`,
-`vapid.json`, `presence.json`, `restarts.json`, `taildrop.json` (all 0600) and `rooms/<room_id>.json`, plus
+`vapid.json`, `presence.json`, `restarts.json`, `taildrop.json` (all 0600), `rooms/<room_id>.json` and
+`kanban-approvals/` (only while a kanban worker waits on you), plus
 `gateway-restart.log` when a Hermes without its own gateway spawner restarts the gateway. On first start it copies `~/.hermes/hermes-push/`
 there if this folder has none of its own files yet, so phones registered with `hermes-push` keep getting pushes. A bot's
 SSH key is in that bot's own home (see Where a bot runs).
@@ -245,4 +270,6 @@ Hermes 0.21.5+ checkout they also ask Hermes's real download route and the plugi
 (`tests/parity_taildrop.py`) and expect the same answers. `tests/integration_taildrop.py` is the end-to-end check on a
 Linux server with Tailscale (read only, or `--send <device>` for one small file). `tests/integration_needs_you.py`, with
 `HERMES_AGENT` set to a Hermes 0.21.5+ checkout, opens and answers a real approval request through Hermes's gateway and
-checks that a connected client was pushed both changes.
+checks that a connected client was pushed both changes. `tests/integration_kanban_approvals.py`, with a Hermes 0.21.6
+checkout, sets its process up like a kanban worker and checks that Hermes's real approval gate refuses at once without the
+relay and waits for the person with it (allowed once, denied, allowed for the session).
