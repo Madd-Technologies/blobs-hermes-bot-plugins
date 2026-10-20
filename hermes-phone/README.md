@@ -17,7 +17,8 @@ turned away.
    list) or strike it out, and approve. Nothing is dialed before that.
 4. The call service calls each number in turn. Every call opens with "Hi, this is an AI assistant calling for <your
    name>. This call is transcribed." Menus get keypad tones, hold music gets silence, and a voicemail gets a short
-   scripted message.
+   scripted message. A call screener (Google Voice, Pixel's Call Screen, the iPhone's) gets the opening line, and the call
+   waits for the person to pick up.
 5. When the errand is done, the bot gets one fixed line in its main chat and reads the results with `phone_call_report`.
    You get one push.
 
@@ -76,6 +77,7 @@ any bot you give this plugin.
 - Your own Twilio account and a voice number. Each person brings their own; nothing is shared.
   - Turn on only the United States and Canada under Voice Geographic Permissions.
   - A trial account works for the test stage, but it can only call verified numbers and plays Twilio's trial notice.
+  - Expect some calls to be blocked while the number is new, mostly to mobile numbers (see "Blocked calls" below).
 - One of these, for the Grok voice. A bot's [hermes-voice](../hermes-voice) settings pick which, when it has them.
   - the server's Grok sign-in
   - the bot's own `XAI_API_KEY`
@@ -126,7 +128,9 @@ any bot you give this plugin.
    in" webhook to `<public_url>/twilio/voice`. That makes inbound calls get turned away cleanly instead of hearing
    Twilio's error message.
 
-5. **Settings**, through the app or `PUT /api/plugins/hermes-phone/settings`:
+5. **Check the line** with a real call to your own phone, before any bot makes one: `tests/twilio_check.py` (see Develop).
+
+6. **Settings**, through the app or `PUT /api/plugins/hermes-phone/settings`:
    - `name`, which the caller says it calls for
    - `never_share`
    - `do_not_call`
@@ -134,6 +138,18 @@ any bot you give this plugin.
    - `public_url`
 
    Keep `stage` at `test` until a few calls to your own numbers sound right.
+
+## Blocked calls
+
+US carriers score every call, and a personal Twilio account's calls go out with the lowest caller-ID attestation (SHAKEN/STIR
+"C"): a full "A" needs a business profile in Twilio's Trust Hub. A new number with a C and a few short calls in a row looks
+like a robocaller, so some calls are turned away before they ring, mostly to mobile numbers. The call record says so (SIP
+603 or 608) rather than "busy". Businesses' landlines and office phone systems block far less.
+
+- Register the number, free, at [Free Caller Registry](https://www.freecallerregistry.com), which reaches the analytics
+  companies behind AT&T, T-Mobile and Verizon.
+- Keep calls few and spread out while the number is new; the daily cap and one call at a time help.
+- With a business, Twilio's Trust Hub (SHAKEN/STIR, CNAM, Voice Integrity) raises the attestation to A.
 
 ## Settings
 
@@ -184,6 +200,11 @@ The tests use fakes for Twilio's REST API, its Media Stream and Grok's socket. `
 plugin through a Hermes checkout's own plugin manager, validator and dashboard. It also starts the call service, against a
 throwaway `HERMES_HOME` with fake keys.
 
+`tests/twilio_check.py` makes one real call through your Twilio number to a phone you name, with the call service as it
+runs on a server but on a throwaway `HERMES_HOME`: answer it and play the company (push it for more than the brief holds,
+put it on hold with music). It needs the public address up (for example `tailscale funnel --bg --https=8443 8796`) and an
+env file with your Twilio keys, `CHECK_CALL` and `XAI_API_KEY` (or `--mint-cmd`); its docstring has the details.
+
 `tests/live.py` runs the same persona and call brain against real Grok. Run it before the first real call, and after any
 change to the persona, the brief or the brain (on the sign-in, it counts against the Grok plan's limits):
 
@@ -209,3 +230,9 @@ What these runs taught us about xAI's realtime voice shapes `brain.py`:
 - **A commit starts a reply,** even with voice detection off, so hold clears the buffer instead.
 - **Stale audio items.** Audio from an item begun while voice detection was off is never committed once detection is
   switched on, so the buffer is cleared at those points.
+
+What real calls taught us about Twilio:
+
+- **Status callbacks aren't retried.** One lost to a tunnel hiccup or a restart is made up for by looking the call up.
+- **The final status callback carries `SipResponseCode`**, which tells a carrier block (603, 608) from a busy line.
+- **Answering-machine detection reports a call screener as a machine**, so screeners are recognized by what they say.

@@ -285,7 +285,7 @@ def for_call(brief: Dict[str, Any], call: Dict[str, Any], name: str, answers: Li
     if CALLBACKS:
         lines.append("- Callback number: the number this call comes from (say \"the number I'm calling from\")")
     else:
-        lines.append(f"- Callback number: none (this line doesn't take calls yet): say {name} will call them back")
+        lines.append(f"- Callback number: none to give: say {name} will call them back")
 
     for answer in answers or []:
         lines.append(f"- {name} answered during this call, to “{answer['question']}”: {answer['answer']}")

@@ -1,4 +1,4 @@
-"""Twilio, the little this plugin needs, without the Twilio library: request signatures, TwiML and two REST calls.
+"""Twilio, the little this plugin needs, without the Twilio library: request signatures, TwiML and three REST calls.
 
 Signatures: X-Twilio-Signature is base64(HMAC-SHA1(Auth Token, URL + each POST parameter's name and value, sorted by
 name)). Voice callbacks over HTTPS are signed with the port dropped, and the Media Streams handshake is signed over the
@@ -28,6 +28,8 @@ API = "https://api.twilio.com/2010-04-01"
 
 #: (url, form fields as a list of pairs, basic-auth user, password, timeout) -> (status, parsed JSON body or None)
 Poster = Callable[[str, List[Tuple[str, str]], str, str, float], Tuple[int, Any]]
+#: (url, basic-auth user, password, timeout) -> (status, parsed JSON body or None)
+Getter = Callable[[str, str, str, float], Tuple[int, Any]]
 
 
 def signature(token: str, url: str, params: Mapping[str, str]) -> str:
@@ -71,6 +73,16 @@ def post_form(url: str, fields: List[Tuple[str, str]], user: str, password: str,
     request = urllib.request.Request(url, data=data, method="POST", headers={
         "Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
 
+    return _send(request, timeout)
+
+
+def get_json(url: str, user: str, password: str, timeout: float) -> Tuple[int, Any]:
+    auth = base64.b64encode(f"{user}:{password}".encode()).decode()
+
+    return _send(urllib.request.Request(url, headers={"Authorization": f"Basic {auth}", "Accept": "application/json"}), timeout)
+
+
+def _send(request: urllib.request.Request, timeout: float) -> Tuple[int, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode() or "{}")
@@ -91,14 +103,20 @@ class TwilioError(Exception):
 class Rest:
     """Places and ends calls. An API key (SID + secret) is used when the server has one, otherwise the Auth Token."""
 
-    def __init__(self, account_sid: str, auth_token: str, api_key: str = "", api_secret: str = "", post: Optional[Poster] = None):
+    def __init__(self, account_sid: str, auth_token: str, api_key: str = "", api_secret: str = "", post: Optional[Poster] = None,
+                 get: Optional[Getter] = None):
         self.account = account_sid
         self.user, self.password = (api_key, api_secret) if api_key and api_secret else (account_sid, auth_token)
         self._post = post or post_form
+        self._get = get or get_json
 
-    def _call(self, path: str, fields: List[Tuple[str, str]]) -> Dict[str, Any]:
+    def _call(self, path: str, fields: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]:
+        url = f"{API}/Accounts/{self.account}/{path}"
         try:
-            status, body = self._post(f"{API}/Accounts/{self.account}/{path}", fields, self.user, self.password, 20.0)
+            if fields is None:
+                status, body = self._get(url, self.user, self.password, 20.0)
+            else:
+                status, body = self._post(url, fields, self.user, self.password, 20.0)
         except Exception as error:  # DNS, TLS, timeout
             raise TwilioError(f"Twilio could not be reached ({type(error).__name__}).") from None
         if status >= 400 or not isinstance(body, dict):
@@ -123,6 +141,10 @@ class Rest:
     def hang_up(self, sid: str) -> None:
         if sid:
             self._call(f"Calls/{sid}.json", [("Status", "completed")])
+
+    def call_status(self, sid: str) -> str:
+        """Twilio's status for a call: queued, ringing, in-progress, completed, busy, no-answer, failed or canceled."""
+        return str(self._call(f"Calls/{sid}.json").get("status") or "")
 
 
 def read_env(path) -> Dict[str, str]:

@@ -420,6 +420,12 @@ class Tools(unittest.TestCase):
         self.assertEqual(h.twilio[-1], {"event": "mark", "streamSid": "MZ1", "mark": {"name": "goodbye"}})
         self.assertEqual(h.hung, [])
         h.twilio_event("mark", mark={"name": "goodbye"})
+        self.assertEqual(h.hung, [])  # a moment for their goodbye
+        h.t[0] += M.GOODBYE_GRACE_S - 0.1
+        h.run(h.brain.tick())
+        self.assertEqual(h.hung, [])
+        h.t[0] += 0.2
+        h.run(h.brain.tick())
         self.assertEqual(h.hung, [True])
         self.assertEqual(h.saved[-1]["status"], "done")
         self.assertEqual(h.saved[-1]["outcome"]["status"], "call_back")
@@ -509,6 +515,114 @@ class Transcript(unittest.TestCase):
         h.grok_event("conversation.item.input_audio_transcription.completed", item_id="i1", transcript="Hello")
         h.twilio_event("stop")
         self.assertNotIn("transcript", h.saved[-1])
+
+
+
+class Screeners(unittest.TestCase):
+    GOOGLE_VOICE = "Hello, please state your name after the tone and Google Voice will try to connect you."
+
+    def heard(self, h, text, item="i1"):
+        h.grok_event("conversation.item.input_audio_transcription.completed", item_id=item, transcript=text)
+
+    def screened(self, prompt=GOOGLE_VOICE):
+        """A screener's prompt, long enough for the greeting to hand over to the voice, then its words."""
+        h = Harness()
+        h.start()
+        h.media(LOUD, 4.2)
+        self.heard(h, prompt)
+        return h
+
+    def answered(self, h):
+        h.grok_event("response.created", response={"id": "s1"})
+        h.grok_event("response.output_audio.delta", delta="NAME")
+        h.grok_event("response.done")
+        h.twilio_event("mark", mark={"name": "screen"})
+
+    def test_google_voice_gets_the_opening_after_its_tone_not_a_voicemail(self):
+        h = self.screened()
+        self.assertEqual((h.brain.state.screening, h.brain.state.phase), ("listening", "screening"))
+        self.assertEqual(h.vad()[-1], None)
+        h.t[0] += M.SCREEN_PAUSE_S + 0.1
+        h.run(h.brain.tick())
+        self.assertEqual(h.forced(), [])  # it mentioned a tone: wait for it
+        h.run(h.brain.on_amd("machine_end_beep"))
+        self.assertEqual(len(h.forced()), 1)
+        self.assertTrue(h.forced()[0].startswith("Hi, this is an AI assistant calling for Alex."))
+        self.assertNotIn("will call you back", h.forced()[0])  # not the voicemail
+        self.answered(h)
+        self.assertEqual(h.sent_media()[-1]["media"]["payload"], "NAME")
+        self.assertTrue(h.brain.state.hold)
+        self.assertEqual(h.brain.state.screening, "waiting")
+        self.assertFalse(h.brain.state.machine)
+
+    def test_the_person_picking_up_gets_the_opening_themselves(self):
+        h = self.screened()
+        h.run(h.brain.on_amd("machine_end_beep"))
+        self.answered(h)
+        self.heard(h, self.GOOGLE_VOICE + " Hello?", item="i2")
+        self.assertEqual(len(h.forced()), 2)
+        self.assertEqual(h.forced()[1], h.forced()[0])
+        self.assertFalse(h.brain.state.hold)
+        self.assertEqual(h.brain.state.screening, "done")
+
+    def test_a_voicemail_greeting_after_the_screener_gets_the_message(self):
+        h = self.screened()
+        h.run(h.brain.on_amd("machine_end_beep"))
+        self.answered(h)
+        self.heard(h, self.GOOGLE_VOICE + " The person you are calling is not available. Please leave a message after the tone.", item="i2")
+        h.t[0] += M.HOLD_BURST_GAP_S + 0.1
+        h.run(h.brain.tick())
+        self.assertIn("Alex will call you back.", h.forced()[-1])
+        self.assertTrue(h.brain.state.machine)
+
+    def test_a_screener_without_a_tone_is_answered_once_it_stops(self):
+        h = self.screened("Hi, the person you're calling is using a screening service. Go ahead and say your name and why you're calling.")
+        h.t[0] += M.SCREEN_PAUSE_S - 0.2
+        h.run(h.brain.tick())
+        self.assertEqual(h.forced(), [])
+        h.t[0] += 0.4
+        h.run(h.brain.tick())
+        self.assertEqual(len(h.forced()), 1)
+
+    def test_its_connecting_message_is_not_a_person(self):
+        h = self.screened()
+        h.run(h.brain.on_amd("machine_end_beep"))
+        self.answered(h)
+        self.heard(h, self.GOOGLE_VOICE + " Please wait while Google Voice tries to connect you.", item="i2")
+        h.t[0] += M.HOLD_BURST_GAP_S + 0.1
+        h.run(h.brain.tick())
+        self.assertEqual(len(h.forced()), 1)
+        self.assertTrue(h.brain.state.hold)
+
+    def test_nobody_after_a_minute_ends_the_call(self):
+        h = self.screened()
+        h.run(h.brain.on_amd("machine_end_beep"))
+        self.answered(h)
+        h.t[0] += M.SCREEN_WAIT_S + 0.1
+        h.run(h.brain.tick())
+        self.assertEqual(h.hung, [True])
+        self.assertEqual(h.saved[-1]["outcome"]["status"], "no_answer")
+        self.assertIn("screener", h.saved[-1]["outcome"]["notes"])
+
+    def test_the_voice_talking_to_a_screener_first_waits_for_the_tone(self):
+        h = Harness()
+        h.start()
+        h.media(LOUD, 4.2)  # a long greeting: the voice takes over, with voice detection on
+        h.brain.state.transcript.append({"who": "them", "text": self.GOOGLE_VOICE, "t": 2.0})
+        h.grok_event("response.created", response={"id": "r1"})
+        h.grok_event("response.output_audio.delta", delta="SPOKE")
+        self.assertEqual(h.sent_media(), [])
+        self.assertEqual(h.forced(), [])
+        self.assertEqual(h.brain.state.screening, "listening")
+
+    def test_a_person_asking_who_is_calling_is_not_a_screener(self):
+        h = Harness()
+        h.start()
+        h.media(LOUD, 0.6)
+        self.heard(h, "Pine Valley Septic, who's calling?")
+        h.media(QUIET, 0.8)
+        self.assertEqual(h.brain.state.screening, "")
+        self.assertEqual(len(h.forced()), 1)
 
 
 if __name__ == "__main__":

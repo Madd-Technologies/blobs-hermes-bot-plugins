@@ -13,8 +13,12 @@ Transport-free (the service and the tests give it ports), so every rule here is 
   after the voice's goodbye, whether or not the voice records it.
 - **Voicemail:** when answering-machine detection reports the end of the greeting, the scripted message is left word for
   word and the call ends.
+- **Call screeners** (Google Voice, Pixel's Call Screen, the iPhone's) ask who is calling before they ring the person. One is
+  answered with the opening line, after its tone if it mentions one, and then the call waits as on hold: a person picking
+  up gets the opening again, a voicemail greeting gets the scripted message, and after a minute of neither the call ends.
 - **Tools:** keypad tones go straight to Twilio as audio. The outcome is checked and saved. `ask_owner` waits on the
-  person, never the bot, and the answer joins the instructions. `end_call` hangs up once the goodbye has played.
+  person, never the bot, and the answer joins the instructions. `end_call` hangs up once the goodbye has played and they
+  have had a moment for theirs.
 - **Limits:** a warning a minute before the call's cap, then a hang-up. A hold cap. At most 3 questions to the person.
 """
 
@@ -56,14 +60,20 @@ MAX_KEYS = 6
 MAX_QUESTIONS = 3
 FIELD_LIMIT = 300
 GOODBYE_TIMEOUT_S = 10.0
+#: After the goodbye has played, a moment for theirs before hanging up (not after a voicemail).
+GOODBYE_GRACE_S = 2.0
 SAVE_EVERY_S = 15.0
+SCREEN_PAUSE_S = 1.5  # a screener that has stopped talking, with no tone to wait for
+SCREEN_TONE_S = 4.0  # the longest wait for a screener's tone (answering-machine detection usually reports it first)
+SCREEN_WAIT_S = 60.0  # after answering a screener, how long to wait for the person or their voicemail
 
 _RECORDING = re.compile(
     r"(your call is important|please (continue to )?hold|(please )?stay on the line|next available|estimated (wait|hold)|"
     r"wait time|press \d|visit (us at|our website)|calls? (may|will) be (recorded|monitored)|in the queue|"
     r"remain on the line|for (english|spanish|quality)|we appreciate your patience|all (of )?our (agents|representatives|staff)|"
     r"(agents|representatives) are (currently )?(busy|helping|assisting)|in the order (it was|they were|calls are) received|"
-    r"(office|business) hours|monday through friday|your call will be|if you know your party)", re.I)
+    r"(office|business) hours|monday through friday|your call will be|if you know your party|please wait|connect(ing)? you|"
+    r"while (we|i|google voice) (try|tries|attempt))", re.I)
 _LIVE = re.compile(
     r"(thanks? (you )?for (holding|waiting|your patience)|this is \w+|how (can|may) i help|speaking|sorry (for|about) (the wait|that)|"
     r"are you (still )?there|hello|^hi\b|^hey\b|^(okay|ok|alright|all right)\b|can i help)", re.I)
@@ -87,6 +97,18 @@ def sounds_live(text: str, heard_on_hold: List[str]) -> bool:
         return False
 
     return bool(_LIVE.search(text)) or len(words) >= 8
+
+
+#: A call screener asking who is calling and why, before it rings the person (not a person asking "who's calling?").
+SCREENER = re.compile(
+    r"(state your name|say your name|record your name|your name and (the )?(reason|why)|why you're calling|"
+    r"what (are you|you're) calling about|screening service|see if (this person|they|he|she) (is|are) available|"
+    r"try to connect you)", re.I)
+TONE = re.compile(r"\b(tone|beep)\b", re.I)
+#: How a person picks up after a screener put them through: often just "Hello?", too short to judge like hold words.
+PICKUP = re.compile(r"^\W*(hello|hi|hey|yes|yeah|speaking|this is)\b", re.I)
+#: A voicemail greeting, listened for while waiting after a screener (answering-machine detection has had its say by then).
+VOICEMAIL = re.compile(r"(leave (a|your) (message|name and number)|not available|after the (tone|beep)|voice ?mail|mailbox|record your message)", re.I)
 
 
 #: The other party asking not to be called again, in their words (the voice is told to honor it too; this doesn't rely on it).
@@ -139,7 +161,7 @@ class Setup:
 
 @dataclass
 class State:
-    phase: str = "connecting"  # connecting, greeting, opening, live, voicemail, ending, ended
+    phase: str = "connecting"  # connecting, greeting, screening, opening, live, voicemail, ending, ended
     stream: str = ""
     started: float = 0.0
     greeting_heard: float = 0.0  # seconds of audio, counted from the frames (frames can arrive in bursts)
@@ -170,6 +192,11 @@ class State:
     response_spoke: bool = False
     respond_after: bool = False
     ending_since: Optional[float] = None
+    hang_up_at: Optional[float] = None
+    screening: str = ""  # a call screener: listening (to its prompt), answering, waiting (for the person), done
+    screen_heard_at: float = 0.0
+    screen_tone: bool = False
+    screen_answered_at: float = 0.0
     human: bool = False
     machine: bool = False
     outcome: Optional[Dict[str, Any]] = None
@@ -257,9 +284,14 @@ class Brain:
                 await self._greeting(ulaw.level(payload), ulaw.seconds(payload))
         elif event == "mark":
             if message.get("mark", {}).get("name") == "goodbye":
-                await self.finish()
+                if self.state.machine:
+                    await self.finish()
+                else:
+                    self.state.hang_up_at = self._now() + GOODBYE_GRACE_S
             elif message.get("mark", {}).get("name") == "opening":
                 await self._opening_played()
+            elif message.get("mark", {}).get("name") == "screen":
+                await self._screen_answered()
         elif event == "stop":
             await self.finish(hung_up_by_them=True)
 
@@ -280,7 +312,7 @@ class Brain:
             await self._opening()
 
     async def _opening(self) -> None:
-        if self.state.opening_said or self.state.force_pending or self.state.phase in ("voicemail", "ending", "ended"):
+        if self.state.opening_said or self.state.force_pending or self.state.phase in ("screening", "voicemail", "ending", "ended"):
             return
         self.state.phase = "opening"
         self.state.human = True
@@ -301,8 +333,9 @@ class Brain:
         """Twilio's asynchronous answering-machine detection (with DetectMessageEnd)."""
         if answered_by == "human":
             self.state.human = True
-        elif answered_by.startswith("machine_end") and self.state.phase not in ("voicemail", "ending", "ended"):
-            self.state.machine = True
+        elif answered_by.startswith("machine_end") and self.state.screening == "listening":
+            await self._answer_screener()  # its tone has sounded
+        elif answered_by.startswith("machine_end") and not self.state.screening and self.state.phase not in ("voicemail", "ending", "ended"):
             await self._voicemail()
         elif answered_by == "fax":
             self.state.outcome = self.state.outcome or {"status": "wrong_number", "notes": "A fax machine answered."}
@@ -310,6 +343,7 @@ class Brain:
 
     async def _voicemail(self) -> None:
         self.state.phase = "voicemail"
+        self.state.machine = True
         self.state.hold = False
         await self._vad(False)
         if self.state.response:
@@ -332,10 +366,16 @@ class Brain:
         elif kind in ("response.output_audio.delta", "response.audio.delta"):
             if self.state.response_gated or self.state.hold or self.state.phase in ("greeting", "ending", "ended"):
                 return
+            if self.state.phase == "screening" and not self.state.force_pending:
+                return  # only the scripted answer goes to a screener
             if not self.state.opening_said and not self.state.force_pending:
-                # The voice is about to talk to someone before the disclosure: say the opening instead.
+                # The voice is about to talk to someone before the disclosure: say the opening instead, or, to a call
+                # screener whose words came in first, wait for its tone.
                 self.state.response_gated = True
                 await self._grok({"type": "response.cancel"})
+                heard = " ".join(line["text"] for line in self.state.transcript if line["who"] == "them")
+                if heard:
+                    await self._screen_heard(heard)
                 await self._opening()
                 return
             self.state.response_spoke = True
@@ -368,6 +408,9 @@ class Brain:
             self.state.opening_said = True
             self.state.opening_sent = self._now()
             await self._twilio("mark", mark={"name": "opening"})
+        elif forced == "screen":
+            self.state.screen_answered_at = self._now()
+            await self._twilio("mark", mark={"name": "screen"})
         elif forced == "voicemail":
             self.state.outcome = self.state.outcome or {"status": "no_answer", "notes": "Left a voicemail."}
             await self._goodbye()
@@ -406,17 +449,48 @@ class Brain:
         said = " ".join(gained(self.state.heard_base, words))
         if not said:
             return
-        for line in reversed(self.state.transcript):  # the same item, refined: one line
-            if line.get("item") == item_id:
-                line["text"] = said[:1000]
-                if DO_NOT_CALL.search(said):
-                    await self._asked_not_to_call()
-                return
-        self._note("them", said)
-        if self.state.transcript and item_id:
-            self.state.transcript[-1]["item"] = item_id
+        line = next((line for line in reversed(self.state.transcript) if line.get("item") == item_id), None)
+        if line is not None:  # the same item, refined: one line
+            line["text"] = said[:1000]
+        else:
+            self._note("them", said)
+            if self.state.transcript and item_id:
+                self.state.transcript[-1]["item"] = item_id
+        await self._screen_heard(said)
         if DO_NOT_CALL.search(said):
             await self._asked_not_to_call()
+
+    # call screeners
+
+    async def _screen_heard(self, said: str) -> None:
+        if self.state.screening == "listening":
+            self.state.screen_heard_at = self._now()
+            self.state.screen_tone = self.state.screen_tone or bool(TONE.search(said))
+            return
+        if (self.state.screening or self.state.opening_said or self.state.force_pending or self.state.phase not in ("greeting", "live")
+                or not SCREENER.search(said)):
+            return
+        self.state.screening, self.state.phase = "listening", "screening"
+        self.state.screen_heard_at, self.state.screen_tone = self._now(), bool(TONE.search(said))
+        await self._vad(False)
+        if self.state.response:
+            self.state.response_gated = True
+            await self._grok({"type": "response.cancel"})
+        await self._twilio("clear")
+        self.ports.log("a call screener answered")
+
+    async def _answer_screener(self) -> None:
+        """Who is calling and why, for the screener to pass on: the opening line, word for word."""
+        if self.state.screening != "listening":
+            return
+        self.state.screening = "answering"
+        await self._say("screen", P.opening(self.setup.brief, self.setup.name, self.setup.transcripts))
+
+    async def _screen_answered(self) -> None:
+        if self.state.screening != "answering":
+            return
+        self.state.screening, self.state.phase = "waiting", "live"
+        await self._enter_hold()
 
     async def _hold_heard(self, new: List[str], words: List[str]) -> None:
         """Words heard on hold gather into a burst (what was said between pauses), judged as a whole: a recording often has a
@@ -431,7 +505,13 @@ class Brain:
 
     async def _hold_judge(self, words: Optional[List[str]] = None) -> None:
         burst, self.state.hold_pending = self.state.hold_pending, ""
-        if not sounds_live(burst, self.state.heard_on_hold):
+        if self.state.screening == "waiting" and VOICEMAIL.search(burst):
+            self.state.screening = "done"
+            self._note("them", burst)
+            await self._voicemail()
+            return
+        picked_up = self.state.screening == "waiting" and bool(PICKUP.search(burst)) and not _RECORDING.search(burst)
+        if not picked_up and not sounds_live(burst, self.state.heard_on_hold):
             self.state.heard_on_hold = (self.state.heard_on_hold + [burst])[-12:]
             return
         words = self.state.heard_last if words is None else words
@@ -440,6 +520,8 @@ class Brain:
         self._note("them", burst)
         if self.state.transcript and self.state.heard_item:
             self.state.transcript[-1]["item"] = self.state.heard_item
+        if self.state.screening == "waiting":
+            self.state.screening = "done"  # the person picked up: they get the opening themselves
         await self._leave_hold(burst)
         if DO_NOT_CALL.search(burst):
             await self._asked_not_to_call()
@@ -595,6 +677,14 @@ class Brain:
             await self._opening()
         if self.state.phase == "opening" and self.state.opening_said and now - self.state.opening_sent >= OPENING_PLAY_MAX_S:
             await self._opening_played()  # Twilio never echoed the mark
+        if self.state.screening == "listening" and now - self.state.screen_heard_at >= (SCREEN_TONE_S if self.state.screen_tone else SCREEN_PAUSE_S):
+            await self._answer_screener()
+        if self.state.screening == "answering" and self.state.screen_answered_at and now - self.state.screen_answered_at >= OPENING_PLAY_MAX_S:
+            await self._screen_answered()  # Twilio never echoed the mark
+        if self.state.screening == "waiting" and now - self.state.screen_answered_at >= SCREEN_WAIT_S:
+            self.state.outcome = self.state.outcome or {"status": "no_answer", "notes": "A call screener took the message; nobody came on the line."}
+            await self.finish()
+            return
         if self.state.nudge_at and now >= self.state.nudge_at:
             self.state.nudge_at = 0.0
             if self.state.responses == self.state.nudge_after and not self.state.response and self.state.phase == "live":
@@ -617,6 +707,8 @@ class Brain:
             await self._instructions("About a minute is left: call record_outcome, say goodbye and end the call.")
         if elapsed >= cap:
             self.state.outcome = self.state.outcome or {"status": "call_back", "notes": "The call reached its time limit."}
+            await self.finish()
+        elif self.state.hang_up_at is not None and now >= self.state.hang_up_at:
             await self.finish()
         elif self.state.ending_since is not None and now - self.state.ending_since >= GOODBYE_TIMEOUT_S:
             await self.finish()

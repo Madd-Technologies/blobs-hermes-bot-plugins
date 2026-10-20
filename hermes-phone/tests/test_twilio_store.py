@@ -65,6 +65,16 @@ class Rest(unittest.TestCase):
                          ("+12025550101", CALLBACK, "DetectMessageEnd", "true", "1260"))
         self.assertEqual([v for k, v in fields if k == "StatusCallbackEvent"], ["initiated", "ringing", "answered", "completed"])
 
+    def test_call_status(self):
+        seen = []
+
+        def get(url, user, password, timeout):
+            seen.append((url, user, password))
+            return 200, {"sid": "CA1", "status": "busy"}
+
+        self.assertEqual(T.Rest("AC1", "token", get=get).call_status("CA1"), "busy")
+        self.assertEqual(seen, [(f"{T.API}/Accounts/AC1/Calls/CA1.json", "AC1", "token")])
+
     def test_an_api_key_is_preferred(self):
         T.Rest("AC1", "token", "SK1", "keysecret", post=self.post).hang_up("CA1")
         url, fields, user, password = self.calls[0]
