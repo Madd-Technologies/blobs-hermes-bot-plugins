@@ -223,6 +223,14 @@ Taildrop is off for this server.
 **The log.** The last 20 sends are kept in `taildrop.json`: when, the device, the file's name, its size, the outcome
 and the CLI's message. Never a path or the contents.
 
+## Hermes 0.22
+
+Works on Hermes 0.21 and 0.22. On 0.22 the assignee's gateway runs a kanban card in a managed worker process of its own,
+which registers its own approval callback and mirrors the approval onto the card's session in the gateway, where no app
+looks. The relay is called after that callback (since 0.1.10), so a card's approval still reaches the app in the chat
+that created the card, and an answer from either side resolves the same wait. The worker loads the bot's own copy of
+this plugin, so every bot that works kanban cards needs its copy updated.
+
 ## Routes
 
 Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
