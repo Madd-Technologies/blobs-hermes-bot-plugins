@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        plugin: [hermes-bot-mobile, hermes-paperless, hermes-drive, hermes-dashboard, hermes-bot-fixes]
+        plugin: [hermes-bot-mobile, hermes-paperless, hermes-drive, hermes-dashboard, hermes-bot-fixes, hermes-kanban]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

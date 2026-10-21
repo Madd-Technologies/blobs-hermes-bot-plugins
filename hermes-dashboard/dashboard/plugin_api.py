@@ -95,13 +95,17 @@ async def bots() -> dict:
     return _guard(lambda S, store: {"bots": store.summary(), "now": int(time.time())})
 
 
-@router.get("/bots/{profile}")
-async def bot(profile: str, since: str | None = None, fresh: bool = False) -> dict:
+# The bot is named `bot`, never `profile`: Hermes 0.22 reads a route parameter called `profile` as "run this request as that
+# profile" and refuses it for a plugin it did not ship. The store is shared by every bot, so no profile scope is needed.
+@router.get("/bots/{bot}")
+async def bot_dashboard(bot: str, since: str | None = None, fresh: bool = False) -> dict:
     """A bot's dashboard. With `since` (the version it last answered) and nothing changed: `{unchanged, version}`, and
     no view is computed. `fresh` reads live sources now instead of from their short cache (the app's pull to refresh).
     `installed` says whether that bot has the plugin (None when it can't be told)."""
 
     _mirror()
+
+    profile = bot
 
     def answer(S, store):
         if since and not fresh:
@@ -119,19 +123,19 @@ async def bot(profile: str, since: str | None = None, fresh: bool = False) -> di
     return _guard(answer)
 
 
-@router.get("/bots/{profile}/needs-you")
-async def bot_needs_you(profile: str) -> dict:
+@router.get("/bots/{bot}/needs-you")
+async def bot_needs_you(bot: str) -> dict:
     _mirror()
 
-    return _guard(lambda S, store: {"profile": profile, "records": store.needs_you_records(profile), "now": int(time.time())})
+    return _guard(lambda S, store: {"profile": bot, "records": store.needs_you_records(bot), "now": int(time.time())})
 
 
-@router.get("/bots/{profile}/views/{view_id}/page")
-async def page(profile: str, view_id: str, bucket: str | None = None, metric: int | None = None, offset: int = 0) -> dict:
+@router.get("/bots/{bot}/views/{view_id}/page")
+async def page(bot: str, view_id: str, bucket: str | None = None, metric: int | None = None, offset: int = 0) -> dict:
     """The page a number, chart or stat opens: `{id, title, kind: list|table|board, panel, count, rows|columns, next,
     group_by?, period?, start?, end?, metric?, fields, live, now}`. `bucket` names a chart's bar (its start date), `metric`
     a stat's metric (from 0). Rows open records; nothing on a page opens another page."""
-    return _guard(lambda S, store: store.page(profile, view_id, bucket=bucket, metric=metric, offset=offset))
+    return _guard(lambda S, store: store.page(bot, view_id, bucket=bucket, metric=metric, offset=offset))
 
 
 @router.get("/records/{record_id}")

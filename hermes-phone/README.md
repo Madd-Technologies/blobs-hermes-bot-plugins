@@ -201,6 +201,13 @@ like a robocaller, so some calls are turned away before they ring, mostly to mob
 
 No audio is recorded. Twilio and xAI each see the call while it happens, under their own terms.
 
+## Hermes 0.22
+
+Works on Hermes 0.21 and 0.22. On 0.22 a finished call's result goes to the bot through its gateway's delivery door
+(`tools.bot_live_delivery.deliver_to_live_owner`, since 0.1.4): admitted at once and durably into Bot Chat's queue, behind
+any turn already running there, with Bot Chat made if the bot has none yet. A gateway that is not up yet means try again
+later; the delivery id makes a retry safe.
+
 ## Develop
 
 ```sh

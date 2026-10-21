@@ -83,6 +83,13 @@ keys it doesn't use. Filters are a small structured language
 (`{field, op, value}`, `all`/`any`/`not`), never SQL. **Your edits win**: a field you changed is left alone by later bot
 writes unless the bot overrides it on purpose.
 
+## Hermes 0.22
+
+Works on Hermes 0.21 and 0.22. The per-bot routes take the bot as `/bots/{bot}` (since 0.6.1; the URLs are unchanged):
+Hermes 0.22 reads a route parameter named `profile` as "run this request as that profile" and either refuses it for a
+plugin it did not ship or forwards it to that bot's own plugin host. The store is shared by every bot, so one copy in the
+default profile serves every bot's dashboard in the dashboard process itself.
+
 ## Install
 
 Hermes loads user plugins per profile (each bot's own `plugins/` folder and `plugins.enabled`). Install it in the default

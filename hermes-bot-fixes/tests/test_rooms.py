@@ -169,5 +169,16 @@ class FindingTheGateway(unittest.TestCase):
         self.assertEqual(started, [(rooms.patch_when_loaded, True)])
 
 
+class OnHermes022(unittest.TestCase):
+    def test_it_stands_down_where_the_gateway_owns_sessions(self):
+        calls = []
+        startup = make_startup(calls)
+
+        with mock.patch.dict(sys.modules, {"gateway.run_startup": startup}), mock.patch.object(rooms, "gateway_owns_sessions", lambda: True):
+            self.assertFalse(rooms.apply())
+
+        self.assertEqual(startup.GatewayStartupMixin._start_hosted_room_worker_sync(), "service")
+
+
 if __name__ == "__main__":
     unittest.main()

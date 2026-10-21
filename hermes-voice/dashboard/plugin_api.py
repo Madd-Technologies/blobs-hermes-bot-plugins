@@ -1,13 +1,13 @@
 """The phone's side of hermes-voice: each bot's voice settings, and the one-time secret a call opens with.
 
-Mounted by Hermes under `/api/plugins/hermes-voice/`, behind the dashboard's own sign-in. Every bot route takes `?profile=<bot>`,
+Mounted by Hermes under `/api/plugins/hermes-voice/`, behind the dashboard's own sign-in. Every bot route takes `?bot=<bot>` (or the older `?profile=<bot>`),
 which Hermes 0.21.6+ also uses to scope the request to that bot's home and secrets, so the bot's own `XAI_API_KEY` and the
 right sign-in are read. One copy of this plugin, in the default profile, serves every bot.
 
   GET  /status               {version, provider, model}
-  GET  /bot?profile=         {enabled, voice, account, available: {sign_in, key}, ready, model}
-  PUT  /bot?profile=         {enabled?, voice?, account?} -> the same as GET
-  POST /session?profile=     {name?, about?} -> {url, protocol_prefix, client_secret, expires_at, model, account, session}
+  GET  /bot?bot=             {enabled, voice, account, available: {sign_in, key}, ready, model}
+  PUT  /bot?bot=             {enabled?, voice?, account?} -> the same as GET
+  POST /session?bot=         {name?, about?} -> {url, protocol_prefix, client_secret, expires_at, model, account, session}
 
 Refusals are `{"detail": {"reason", "message"}}`. Nothing here ever returns or logs the sign-in token or a key.
 """
@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -88,6 +89,28 @@ def _bot(profile: str) -> str:
     return profile
 
 
+def _which(bot: Optional[str], profile: Optional[str]) -> str:
+    """The bot a request is for: `?bot=` (what the app sends from this version on), else the older `?profile=`."""
+    name = bot or profile
+
+    if not name:
+        raise _core().VoiceError("invalid", "Say which bot (?bot=).", 400)
+
+    return _bot(name)
+
+
+def _as_bot(bot: str):
+    """Run as that bot, with its own home and secrets, so its own xAI key and Grok sign-in are read. Hermes enters this scope
+    itself for `?profile=`, but from 0.22 it refuses `?profile=` for another bot on a plugin it did not ship. So the app
+    names the bot as `?bot=` and the plugin enters the same scope (Hermes's `_config_profile_scope`, in 0.21 and 0.22)."""
+    try:
+        from hermes_cli.web_server_profiles import _config_profile_scope
+    except Exception:
+        return nullcontext()
+
+    return _config_profile_scope(bot)
+
+
 def _refusal(error) -> JSONResponse:
     log.info("hermes-voice: refused (%s)", error.reason)
     return JSONResponse(status_code=error.status, content={"detail": error.detail()})
@@ -113,39 +136,46 @@ def status() -> Dict[str, Any]:
 
 
 @router.get("/bot")
-def get_bot(profile: str = Query(...)):
+def get_bot(bot: Optional[str] = Query(None), profile: Optional[str] = Query(None)):
     core = _core()
 
     try:
-        return core.view(_store().get(_bot(profile)), accounts())
+        name = _which(bot, profile)
+
+        with _as_bot(name):
+            return core.view(_store().get(name), accounts())
     except core.VoiceError as error:
         return _refusal(error)
 
 
 @router.put("/bot")
-def put_bot(change: Change, profile: str = Query(...)):
+def put_bot(change: Change, bot: Optional[str] = Query(None), profile: Optional[str] = Query(None)):
     core = _core()
 
     try:
-        bot = _bot(profile)
-        saved = _store().update(bot, core.check_change(change.model_dump()))
-        return core.view(saved, accounts())
+        name = _which(bot, profile)
+
+        with _as_bot(name):
+            saved = _store().update(name, core.check_change(change.model_dump()))
+            return core.view(saved, accounts())
     except core.VoiceError as error:
         return _refusal(error)
 
 
 @router.post("/session")
-def session(caller: Optional[Caller] = None, profile: str = Query(...)):
+def session(caller: Optional[Caller] = None, bot: Optional[str] = Query(None), profile: Optional[str] = Query(None)):
     core = _core()
     caller = caller or Caller()
 
     try:
-        bot = _bot(profile)
-        readers = accounts()
-        settings = core.view(_store().get(bot), readers)
-        out = core.mint(settings, readers, core.persona(caller.name, caller.about, bot), poster)
+        name = _which(bot, profile)
+
+        with _as_bot(name):
+            readers = accounts()
+            settings = core.view(_store().get(name), readers)
+            out = core.mint(settings, readers, core.persona(caller.name, caller.about, name), poster)
     except core.VoiceError as error:
         return _refusal(error)
 
-    log.info("hermes-voice: a call secret for %s (%s, expires_at=%s)", bot, out["account"], out["expires_at"])
+    log.info("hermes-voice: a call secret for %s (%s, expires_at=%s)", name, out["account"], out["expires_at"])
     return out

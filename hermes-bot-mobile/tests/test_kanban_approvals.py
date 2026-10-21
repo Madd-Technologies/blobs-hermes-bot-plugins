@@ -124,11 +124,31 @@ class Relay(unittest.TestCase):
 
     def test_a_session_without_a_notify_callback_falls_back_to_the_relay(self):
         self.relay.install()
-        own = lambda data: None  # noqa: E731
-        self.approval._gateway_notify_cbs["chat-1"] = own
-
-        self.assertIs(self.approval._gateway_notify_cbs.get("chat-1"), own)
         self.assertTrue(callable(self.approval._gateway_notify_cbs.get("default")))
+
+    def test_on_hermes_0_22_the_gateways_callback_and_the_relay_both_get_it(self):
+        # The gateway's managed worker registers its own callback for the card's session; the app must still see it.
+        self.relay.install()
+        seen = []
+        self.approval._gateway_notify_cbs["card"] = lambda data: seen.append(data["request_id"])
+        notified = []
+        self.relay.notify = lambda session_key, data: notified.append((session_key, data["request_id"]))
+
+        self.approval._gateway_notify_cbs.get("card")({"request_id": "abc123"})
+        self.assertEqual(seen, ["abc123"])
+        self.assertEqual(notified, [("card", "abc123")])
+
+    def test_a_relay_failure_leaves_the_gateways_copy_standing(self):
+        self.relay.install()
+        seen = []
+        self.approval._gateway_notify_cbs["card"] = lambda data: seen.append(data["request_id"])
+
+        def broken(session_key, data):
+            raise OSError("disk full")
+
+        self.relay.notify = broken
+        self.approval._gateway_notify_cbs.get("card")({"request_id": "abc123"})
+        self.assertEqual(seen, ["abc123"])
 
     def test_the_approval_is_written_down_answered_and_cleared(self):
         self.relay.install()

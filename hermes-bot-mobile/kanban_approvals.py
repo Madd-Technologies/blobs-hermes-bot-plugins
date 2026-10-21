@@ -1,7 +1,7 @@
 """Approvals for kanban workers, answered from the phone app.
 
-A kanban card is worked by a headless worker: Hermes's dispatcher starts `hermes -p <assignee> chat -q "work kanban task
-<id>"`. Hermes counts a `-q` run as having nobody to ask (`HERMES_SINGLE_QUERY_SESSION`), so every command that needs an OK
+A kanban card is worked by a headless worker: on Hermes 0.21 the dispatcher starts `hermes -p <assignee> chat -q "work kanban
+task <id>"`; on 0.22 the assignee's gateway runs the card in a managed worker process of its own. Hermes counts a `-q` run as having nobody to ask (`HERMES_SINGLE_QUERY_SESSION`), so every command that needs an OK
 is refused on the spot (`approvals.single_query_mode: deny`), and the worker gives up on its card or blocks it.
 
 In a worker this module asks the person instead, through Hermes's own gateway round-trip:
@@ -219,8 +219,14 @@ def worker_context(env=os.environ, read: Callable[[str, str], Optional[dict]] = 
 
 
 class RelayCallbacks(dict):
-    """Hermes's session -> notify-callback table, falling back to the relay for a session with none. In a worker no gateway
-    registers one, and Hermes would otherwise leave the approval where nobody sees it."""
+    """Hermes's session -> notify-callback table, with the relay added for a worker's approvals.
+
+    - Hermes 0.21: a worker is a `hermes chat -q` run that no gateway registers a callback for, so the relay is the only way the
+      approval reaches anyone.
+    - Hermes 0.22: the gateway runs a card in a managed worker that registers its own callback, which mirrors the approval onto
+      the card's session in the gateway, where no app looks. The relay is called after it, so the approval also reaches the app;
+      an answer from either side resolves the same wait. A relay failure leaves the gateway's copy standing.
+    """
 
     def __init__(self, items=(), fallback: Optional[Callable[[str], Callable[[dict], None]]] = None):
         super().__init__(items)
@@ -229,10 +235,23 @@ class RelayCallbacks(dict):
     def get(self, key, default=None):
         found = super().get(key)
 
-        if found is not None:
-            return found
+        if self.fallback is None:
+            return found if found is not None else default
 
-        return self.fallback(key) if self.fallback is not None else default
+        relay = self.fallback(key)
+
+        if found is None:
+            return relay
+
+        def both(data, _gateway=found, _relay=relay):
+            _gateway(data)
+
+            try:
+                _relay(data)
+            except Exception:
+                log.warning("hermes-bot-mobile: a kanban approval could not be put in the app; it waits in the gateway", exc_info=True)
+
+        return both
 
 
 class WorkerRelay:
