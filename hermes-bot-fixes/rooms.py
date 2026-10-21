@@ -15,6 +15,9 @@ turn it accepted, so the gateway's leases lapse and the dashboard's worker takes
 platforms then fail closed in the gateway, as Hermes does when its worker is down; the app's rooms are unaffected.
 ``HERMES_BOT_FIXES_GATEWAY_ROOMS=on`` leaves the gateway's worker alone.
 
+Hermes 0.22 changed this on purpose: the gateway owns every local session and runs rooms through its own hosted service,
+whose waiting approvals the app answers through hermes-bot-mobile's room bridge. There the fix stands down.
+
 The fix is only applied in the messaging gateway: the process started as ``hermes gateway run``, or one where Hermes's
 gateway startup code is loaded. The gateway loads its plugins while its own modules are still being imported, before the
 startup code that defines that method exists, so the fix waits for it on a small background thread and applies as soon
@@ -122,12 +125,26 @@ def patch_when_loaded(wait: float = WAIT_SECONDS, every: float = LOOK_EVERY, sle
         sleep(every)
 
 
+def gateway_owns_sessions() -> bool:
+    """Hermes 0.22+: the gateway owns sessions and runs rooms through its own hosted service on purpose, and its rooms' waiting
+    approvals are answered through it (hermes-bot-mobile's room bridge). Keeping it out of rooms is then wrong, not a fix."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("gateway.session_hosted_service") is not None
+    except Exception:
+        return False
+
+
 def apply() -> bool | str:
     """Apply the fix in the messaging gateway. Never raises. True when it is in place, "waiting" while it waits for the
-    gateway's startup code to load, False where it does not apply (the dashboard) or is switched off."""
+    gateway's startup code to load, False where it does not apply (the dashboard, Hermes 0.22+) or is switched off."""
     if not enabled():
         log.info("hermes-bot-fixes: gateway rooms fix switched off (%s=on)", SWITCH)
 
+        return False
+
+    if gateway_owns_sessions():
         return False
 
     if loaded_startup() is not None:

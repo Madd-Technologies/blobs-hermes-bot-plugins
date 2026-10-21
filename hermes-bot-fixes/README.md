@@ -73,6 +73,19 @@ and logged), so a newer Hermes that changed it simply goes unpatched.
     (`hermes gateway run`) and applies as soon as that code has loaded. Its log line says `gateway out of rooms waiting`,
     then `gateway rooms fix applied`. 0.6.0 checked too early and never applied after a restart.
 
+## Hermes 0.22
+
+Works on Hermes 0.21 and 0.22 (since 0.7.0). What changes on 0.22:
+
+- **Bot inbox:** 0.22 delivers a teammate's message only into the recipient's main chat, through its gateway. The fix
+  hands it to the gateway's bot-to-bot door (`a2a.forward`, through `inbox_a2a.py`) instead: the message runs in the
+  recipient's inbox, one per sending bot, and the reply goes back to the sender as before. These inbox chats are titled
+  by Hermes from their first exchange.
+- **Gateway rooms:** stands down. On 0.22 the gateway's own room service runs only rooms it owns (made through its own
+  protocol), so the rooms the app makes through the dashboard keep running in the dashboard, where their approvals and
+  questions reach the app.
+- Capture, compaction, hand-off, reply once and the database guard apply unchanged.
+
 ## Install
 
 In the **default profile**: the fixes apply to the whole Hermes process, so every bot the dashboard and the messaging

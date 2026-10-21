@@ -20,6 +20,12 @@ teammate delivery only (``[<hermes cli>, "-p", <bot>, *BOT_CHAT_TURN_ARGS]``, no
   ``--query-file`` it appends, its one policy-gated retry, its busy handling and the reply on stdout are all Hermes's.
   ``inbox_turn.py`` takes the bot's turn lock and gives the turn the recipient's own environment, as the runner would.
 
+Hermes 0.22 delivers a local teammate's message only into the recipient's main chat, through its gateway: message_agent
+passes ``[<hermes cli>, "-p", <bot>]`` with the recipient's ``profile_home``, and the one-shot turn above is gone. There the
+wrap hands the delivery to the runner's stdin transport instead, with ``inbox_a2a.py`` as the command: it forwards the message
+through the gateway's bot-to-bot door (``a2a.forward``) into the recipient's inbox, one per sending bot, and prints the reply,
+which the runner returns to the sender as before.
+
 Peers, other connections and relayed deliveries are left alone, and so are routines and Kanban (they never pass through
 here). ``HERMES_BOT_FIXES_BOT_INBOX=off`` switches the inbox off; Hermes's own delivery then runs as it always did. It
 checks the function's shape first and leaves anything unexpected alone (logged).
@@ -28,6 +34,7 @@ checks the function's shape first and leaves anything unexpected alone (logged).
 from __future__ import annotations
 
 import functools
+import importlib.util
 import inspect
 import logging
 import os
@@ -45,8 +52,9 @@ INBOX_TITLE = "Bot Inbox"
 SWITCH = "HERMES_BOT_FIXES_BOT_INBOX"
 OFF = ("0", "off", "false", "no")
 
-#: The runner the delivery runs instead of ``hermes``.
+#: The runner the delivery runs instead of ``hermes`` (Hermes 0.21), and the transport it runs on Hermes 0.22.
 TURN = Path(__file__).resolve().with_name("inbox_turn.py")
+A2A_TURN = Path(__file__).resolve().with_name("inbox_a2a.py")
 
 #: _start_delivery's parameters in the Hermes this fixes; anything else is left alone.
 PARAMS = ["argv", "content", "label", "stdin_file", "task_id", "agent", "profile_home", "author"]
@@ -81,6 +89,35 @@ def teammate(argv, stdin_file) -> str | None:
     return str(argv[2]) or None
 
 
+def teammate_022(argv, stdin_file, profile_home) -> str | None:
+    """Hermes 0.22: the bot a local teammate delivery is for (``[<hermes>, "-p", <bot>]`` with its home), else None."""
+    if stdin_file or profile_home is None or not isinstance(argv, (list, tuple)) or len(argv) != 3:
+        return None
+
+    cli = str(argv[0]).rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+
+    if cli not in ("hermes", "hermes.exe") or argv[1] != "-p":
+        return None
+
+    return str(argv[2]) or None
+
+
+def a2a_argv(agent_dir, profile_home, bot: str, peer: str) -> list[str]:
+    """The stdin transport that runs one teammate message in the bot's inbox through its gateway (inbox_a2a.py)."""
+    return [
+        sys.executable, str(A2A_TURN), "--hermes-agent", str(agent_dir), "--profile-home", str(profile_home),
+        "--recipient", bot, "--peer", peer,
+    ]
+
+
+def a2a_available() -> bool:
+    """Whether this Hermes has the gateway's bot-to-bot door (0.22+)."""
+    try:
+        return importlib.util.find_spec("gateway.session_a2a") is not None
+    except Exception:
+        return False
+
+
 def inbox_argv(argv, agent_dir, profile_home) -> list[str]:
     """The delivery argv that runs the same turn in the bot's inbox, through inbox_turn.py."""
     return [
@@ -108,18 +145,24 @@ def patch_start_delivery(module, relay) -> bool:
     if getattr(original, MARK, False):
         return True
 
-    if (
-        _params(original) != PARAMS
-        or tuple(getattr(relay, "BOT_CHAT_TURN_ARGS", ())) != BOT_CHAT_TURN_ARGS
-        or not all(callable(getattr(module, name, None)) for name in HELPERS)
-        or not all(getattr(relay, name, None) is not None for name in RELAY)
-        or not TURN.is_file()
-    ):
+    local_turn = (
+        _params(original) == PARAMS
+        and tuple(getattr(relay, "BOT_CHAT_TURN_ARGS", ())) == BOT_CHAT_TURN_ARGS
+        and all(callable(getattr(module, name, None)) for name in HELPERS)
+        and all(getattr(relay, name, None) is not None for name in RELAY)
+        and TURN.is_file()
+    )
+    through_gateway = not local_turn and _params(original) == PARAMS and a2a_available() and A2A_TURN.is_file()
+
+    if not (local_turn or through_gateway):
         log.warning("hermes-bot-fixes: message delivery differs in this Hermes; bot inbox not applied")
 
         return False
 
     agent_dir = Path(module.__file__).resolve().parent.parent
+
+    if through_gateway:
+        return _patch_through_gateway(module, original, agent_dir)
 
     @functools.wraps(original)
     def start_delivery(argv, content, label, *, stdin_file, task_id, agent, profile_home=None, author=None):
@@ -145,6 +188,36 @@ def patch_start_delivery(module, relay) -> bool:
         log.info("hermes-bot-fixes: a message for %s runs in its inbox, not its main chat", name)
 
         return original(routed, content, label, stdin_file=False, task_id=task_id, agent=agent, profile_home=None, author=author)
+
+    setattr(start_delivery, MARK, True)
+    module._start_delivery = start_delivery
+
+    return True
+
+
+def _patch_through_gateway(module, original, agent_dir: Path) -> bool:
+    """Hermes 0.22: a local teammate's message goes to the recipient's inbox through its gateway (see the module notes)."""
+
+    @functools.wraps(original)
+    def start_delivery(argv, content, label, *, stdin_file, task_id, agent, profile_home=None, author=None):
+        routed = None
+
+        try:
+            name = teammate_022(argv, stdin_file, profile_home) if enabled() else None
+
+            if name:
+                peer = str((author or {}).get("id") or "bot:teammate")
+                routed = a2a_argv(agent_dir, Path(profile_home).resolve(), name, peer)
+        except Exception:
+            log.exception("hermes-bot-fixes: routing a teammate's message to the inbox failed; delivering it as Hermes does")
+            routed = None
+
+        if routed is None:
+            return original(argv, content, label, stdin_file=stdin_file, task_id=task_id, agent=agent, profile_home=profile_home, author=author)
+
+        log.info("hermes-bot-fixes: a message for %s runs in its inbox, not its main chat", name)
+
+        return original(routed, content, label, stdin_file=True, task_id=task_id, agent=agent, profile_home=None, author=author)
 
     setattr(start_delivery, MARK, True)
     module._start_delivery = start_delivery

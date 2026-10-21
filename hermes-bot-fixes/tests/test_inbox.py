@@ -343,5 +343,105 @@ class InboxTurnTest(unittest.TestCase):
                          ("a", "h", ["hermes", "-p", "x"]))
 
 
+def make_022_modules(calls):
+    """Hermes 0.22: the same _start_delivery, but bot_relay has no one-shot Bot Chat turn any more."""
+    module, _ = make_modules(calls)
+    relay = types.ModuleType("bot_relay")
+
+    return module, relay
+
+
+class ThroughTheGateway(unittest.TestCase):
+    """On Hermes 0.22 a teammate's message goes to the recipient's inbox through the gateway's bot-to-bot door."""
+
+    def setUp(self):
+        self.calls = []
+        self.module, self.relay = make_022_modules(self.calls)
+        patcher = mock.patch.object(inbox, "a2a_available", lambda: True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertTrue(inbox.patch_start_delivery(self.module, self.relay))
+
+    def send(self, argv, **kw):
+        args = dict(stdin_file=False, task_id="t1", agent=None, profile_home=HOME, author=ORION)
+        args.update(kw)
+
+        return self.module._start_delivery(argv, "Message from 🤖 orion (@orion): is the build green?", "juniper", **args)
+
+    def test_a_local_teammate_message_runs_in_the_inbox(self):
+        self.send([CLI, "-p", "juniper"])
+        (call,) = self.calls
+        self.assertTrue(call["stdin_file"])
+        self.assertIsNone(call["profile_home"])
+        self.assertEqual(call["argv"][1], str(inbox.A2A_TURN))
+        self.assertEqual(call["argv"][call["argv"].index("--recipient") + 1], "juniper")
+        self.assertEqual(call["argv"][call["argv"].index("--peer") + 1], "bot:orion")
+        self.assertEqual(call["argv"][call["argv"].index("--profile-home") + 1], str(HOME.resolve()))
+        self.assertEqual(call["author"], ORION)
+
+    def test_peers_stdin_transports_and_the_switch_are_left_alone(self):
+        self.send(["ssh", "peer", "hermes"], stdin_file=True, profile_home=None)
+        self.send([CLI, "-p", "juniper"], profile_home=None)
+
+        with mock.patch.dict(os.environ, {inbox.SWITCH: "off"}):
+            self.send([CLI, "-p", "juniper"])
+
+        self.assertEqual([c["argv"][0] for c in self.calls], ["ssh", CLI, CLI])
+        self.assertEqual([c["profile_home"] for c in self.calls], [None, None, HOME])
+
+    def test_a_hermes_without_either_way_is_left_alone(self):
+        calls = []
+        module, relay = make_022_modules(calls)
+
+        with mock.patch.object(inbox, "a2a_available", lambda: False):
+            self.assertFalse(inbox.patch_start_delivery(module, relay))
+
+
+class InboxTransport(unittest.TestCase):
+    """inbox_a2a.py: one message in, the recipient's reply out."""
+
+    def setUp(self):
+        import inbox_a2a
+
+        self.inbox_a2a = inbox_a2a
+        self.forwarded = []
+        gateway = types.ModuleType("gateway")
+        a2a = types.ModuleType("gateway.session_a2a")
+
+        async def forward_to_owner(home, **kw):
+            self.forwarded.append(dict(home=home, **kw))
+
+            return {"status": "terminal", "result": {"final_response": "Yes, all green."}}
+
+        a2a.forward_to_owner = forward_to_owner
+        patcher = mock.patch.dict(sys.modules, {"gateway": gateway, "gateway.session_a2a": a2a})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_it(self, text):
+        import io
+        from contextlib import redirect_stdout
+
+        out = io.StringIO()
+
+        with redirect_stdout(out):
+            code = self.inbox_a2a.main(["--hermes-agent", "/srv/hermes/hermes-agent", "--profile-home", str(HOME), "--recipient", "juniper", "--peer", "bot:orion"], io.StringIO(text))
+
+        return code, out.getvalue().strip()
+
+    def test_it_forwards_into_the_senders_inbox_and_prints_the_reply(self):
+        self.assertEqual(self.run_it("is the build green?"), (0, "Yes, all green."))
+        (sent,) = self.forwarded
+        self.assertEqual((sent["agent"], sent["peer"], sent["context_id"], sent["tenant"]), ("juniper", "bot:orion", "bot-inbox", ""))
+        self.assertEqual(sent["text"], "is the build green?")
+
+    def test_an_empty_message_is_not_sent(self):
+        self.assertEqual(self.run_it("  ")[0], 1)
+        self.assertEqual(self.forwarded, [])
+
+    def test_a_reply_less_turn_says_so(self):
+        self.assertIn("without a reply", self.inbox_a2a.reply_of({"result": {}}))
+
+
 if __name__ == "__main__":
     unittest.main()
