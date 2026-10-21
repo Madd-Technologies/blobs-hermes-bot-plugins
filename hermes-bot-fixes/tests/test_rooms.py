@@ -107,5 +107,67 @@ class GatewayOutOfRooms(unittest.TestCase):
         self.assertEqual(startup.GatewayStartupMixin._start_hosted_room_worker_sync(), "service")
 
 
+class FindingTheGateway(unittest.TestCase):
+    """The gateway loads its plugins before its startup code: it is known by its command line, and the fix waits."""
+
+    def test_the_gateway_is_known_by_its_command_line(self):
+        self.assertTrue(rooms.gateway_process(["hermes", "gateway", "run"]))
+        self.assertTrue(rooms.gateway_process(["hermes", "-p", "orion", "gateway", "run", "--replace"]))
+        self.assertFalse(rooms.gateway_process(["hermes", "dashboard", "--no-open"]))
+        self.assertFalse(rooms.gateway_process(["hermes", "gateway", "status"]))
+        self.assertFalse(rooms.gateway_process(["hermes"]))
+
+    def test_it_waits_for_the_startup_code_then_applies(self):
+        calls = []
+        startup = make_startup(calls)
+        naps = []
+
+        def sleep(seconds):
+            naps.append(seconds)
+
+            if len(naps) == 3:
+                sys.modules["gateway.run_startup"] = startup
+
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("gateway.run_startup", None)
+            self.assertTrue(rooms.patch_when_loaded(wait=60, every=0.2, sleep=sleep, clock=lambda: 0))
+
+        self.assertEqual(len(naps), 3)
+        self.assertIsNone(startup.GatewayStartupMixin._start_hosted_room_worker_sync())
+        self.assertEqual(calls, [])
+
+    def test_a_module_still_being_imported_is_not_ready(self):
+        half = types.ModuleType("gateway.run_startup")
+
+        with mock.patch.dict(sys.modules, {"gateway.run_startup": half}):
+            self.assertIsNone(rooms.loaded_startup())
+
+    def test_it_gives_up_when_the_startup_code_never_comes(self):
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("gateway.run_startup", None)
+            self.assertFalse(rooms.patch_when_loaded(wait=1.0, every=0.25, sleep=sleep, clock=lambda: now[0]))
+
+    def test_in_the_gateway_it_waits_on_a_thread_and_says_so(self):
+        started = []
+
+        class Thread:
+            def __init__(self, target=None, name=None, daemon=None):
+                started.append((target, daemon))
+
+            def start(self):
+                pass
+
+        with mock.patch.dict(sys.modules, {}), mock.patch.object(sys, "argv", ["hermes", "gateway", "run"]), mock.patch.object(rooms.threading, "Thread", Thread):
+            sys.modules.pop("gateway.run_startup", None)
+            self.assertEqual(rooms.apply(), "waiting")
+
+        self.assertEqual(started, [(rooms.patch_when_loaded, True)])
+
+
 if __name__ == "__main__":
     unittest.main()

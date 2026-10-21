@@ -15,8 +15,11 @@ turn it accepted, so the gateway's leases lapse and the dashboard's worker takes
 platforms then fail closed in the gateway, as Hermes does when its worker is down; the app's rooms are unaffected.
 ``HERMES_BOT_FIXES_GATEWAY_ROOMS=on`` leaves the gateway's worker alone.
 
-The fix is only applied where Hermes's gateway startup code is already loaded, so the dashboard never imports it. It
-checks the method's shape first and leaves anything unexpected alone (logged).
+The fix is only applied in the messaging gateway: the process started as ``hermes gateway run``, or one where Hermes's
+gateway startup code is loaded. The gateway loads its plugins while its own modules are still being imported, before the
+startup code that defines that method exists, so the fix waits for it on a small background thread and applies as soon
+as it is there; a worker the gateway started first is stopped on its next keep-alive tick. The dashboard never imports
+the gateway's code. The fix checks the method's shape first and leaves anything unexpected alone (logged).
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ import inspect
 import logging
 import os
 import sys
+import threading
+import time
 
 log = logging.getLogger("hermes-bot-fixes")
 
@@ -70,22 +75,68 @@ def patch_startup(startup) -> bool:
     return True
 
 
-def apply() -> bool:
-    """Apply the fix in the messaging gateway. Never raises; True when it is in place."""
+#: How long the gateway's startup code is waited for after the plugin loads, and how often it is looked for.
+WAIT_SECONDS = 600.0
+LOOK_EVERY = 0.2
+
+
+def gateway_process(argv=None) -> bool:
+    """Whether this process is the messaging gateway: started as ``hermes gateway run`` (with any flags between)."""
+    words = [word for word in (sys.argv if argv is None else argv)[1:] if not word.startswith("-")]
+
+    return any(word == "gateway" and words[index + 1:index + 2] == ["run"] for index, word in enumerate(words))
+
+
+def loaded_startup():
+    """Hermes's gateway startup module once its mixin is defined (a module still being imported has none yet), or None."""
+    startup = sys.modules.get("gateway.run_startup")
+
+    return startup if startup is not None and hasattr(startup, "GatewayStartupMixin") else None
+
+
+def patch_when_loaded(wait: float = WAIT_SECONDS, every: float = LOOK_EVERY, sleep=time.sleep, clock=time.monotonic) -> bool:
+    """Wait for the gateway's startup code and apply the fix to it. True once applied; False if it never came."""
+    deadline = clock() + wait
+
+    while True:
+        startup = loaded_startup()
+
+        if startup is not None:
+            try:
+                applied = patch_startup(startup)
+            except Exception:
+                log.exception("hermes-bot-fixes: gateway rooms fix failed")
+
+                return False
+
+            if applied:
+                log.info("hermes-bot-fixes: gateway rooms fix applied; the dashboard runs the rooms")
+
+            return applied
+
+        if clock() >= deadline:
+            log.warning("hermes-bot-fixes: gateway rooms fix not applied (the gateway's startup code never loaded)")
+
+            return False
+
+        sleep(every)
+
+
+def apply() -> bool | str:
+    """Apply the fix in the messaging gateway. Never raises. True when it is in place, "waiting" while it waits for the
+    gateway's startup code to load, False where it does not apply (the dashboard) or is switched off."""
     if not enabled():
         log.info("hermes-bot-fixes: gateway rooms fix switched off (%s=on)", SWITCH)
 
         return False
 
-    # Loaded only in a process that runs Hermes's gateway: anywhere else (the dashboard) there is nothing to keep out.
-    startup = sys.modules.get("gateway.run_startup")
+    if loaded_startup() is not None:
+        return patch_when_loaded(wait=0)
 
-    if startup is None:
+    # The gateway imports its startup code after loading plugins; anywhere else there is nothing to keep out of rooms.
+    if not gateway_process() and "gateway.run" not in sys.modules:
         return False
 
-    try:
-        return patch_startup(startup)
-    except Exception:
-        log.exception("hermes-bot-fixes: gateway rooms fix failed")
+    threading.Thread(target=patch_when_loaded, name="hermes-bot-fixes-gateway-rooms", daemon=True).start()
 
-        return False
+    return "waiting"

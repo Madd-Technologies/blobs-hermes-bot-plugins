@@ -69,6 +69,9 @@ and logged), so a newer Hermes that changed it simply goes unpatched.
   - The gateway keeps everything else: routines, Kanban workers, heartbeats, messaging platforms. Only group chats on a
     messaging platform stop, as Hermes does when its room worker is down; the app's rooms are not those.
   - To switch it off, put `HERMES_BOT_FIXES_GATEWAY_ROOMS=on` in `~/.hermes/.env` and restart the messaging gateway.
+  - The gateway loads its plugins before its own startup code, so the fix knows the gateway by its command line
+    (`hermes gateway run`) and applies as soon as that code has loaded. Its log line says `gateway out of rooms waiting`,
+    then `gateway rooms fix applied`. 0.6.0 checked too early and never applied after a restart.
 
 ## Install
 

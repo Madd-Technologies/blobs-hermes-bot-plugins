@@ -1,44 +1,51 @@
-"""Through a real Hermes checkout: with hermes-bot-fixes loaded by Hermes's own plugin manager, the messaging gateway's
-room-worker start does nothing and stops a worker already running there, and the dashboard's start still works.
+"""Through a real `hermes gateway run`: with hermes-bot-fixes, the messaging gateway runs no group-room worker; without it,
+it does. The gateway loads its plugins before its own startup code, which is what this catches (0.6.0 missed it).
 
-Not part of the unit tests (it needs a Hermes checkout at the version being fixed). Run it with that Hermes's venv:
+Not part of the unit tests (it starts a gateway from a Hermes checkout at the version being fixed). Run it with that
+Hermes's venv, once without the plugin and once with it:
 
-    ~/.hermes/hermes-agent/venv/bin/python -I hermes-bot-fixes/tests/integration_rooms.py [path to a Hermes checkout]
+    ~/.hermes/hermes-agent/venv/bin/python -I hermes-bot-fixes/tests/integration_rooms.py without
+    ~/.hermes/hermes-agent/venv/bin/python -I hermes-bot-fixes/tests/integration_rooms.py with
 
-HERMES_HOME is a throwaway folder, so the real `~/.hermes` is never read or written.
+HERMES_AGENT=<checkout> picks another Hermes checkout (default ~/.hermes/hermes-agent). Everything runs in a throwaway
+HERMES_HOME with no messaging platforms, so the real `~/.hermes` is never read or written. After CHECK_AFTER seconds
+(default 25) it prints whether the room worker runs, then ends the gateway.
 """
-import os, shutil, sys, tempfile
+import os, runpy, shutil, sys, tempfile, threading, time
 from pathlib import Path
 
+WITH_PLUGIN = sys.argv[1] == "with"
+HERMES = Path(os.environ.get("HERMES_AGENT") or Path.home() / ".hermes" / "hermes-agent")
 PLUGIN = Path(__file__).resolve().parent.parent
-sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / ".hermes" / "hermes-agent"))
-home = Path(tempfile.mkdtemp(prefix="hermes-bot-fixes-rooms-"))
+home = Path(tempfile.mkdtemp(prefix="hermes-bot-fixes-gateway-"))
 os.environ["HERMES_HOME"] = str(home)
 os.environ["HERMES_KANBAN_HOME"] = str(home)
 (home / "plugins").mkdir()
-shutil.copytree(PLUGIN, home / "plugins" / "hermes-bot-fixes", ignore=shutil.ignore_patterns("tests", "__pycache__"))
-(home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-bot-fixes\n")
+if WITH_PLUGIN:
+    shutil.copytree(PLUGIN, home / "plugins" / "hermes-bot-fixes", ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-bot-fixes\n")
+else:
+    (home / "config.yaml").write_text("plugins:\n  enabled: []\n")
+sys.path.insert(0, str(HERMES))
 
-import gateway.run  # noqa: F401  the messaging gateway's code, as `hermes gateway run` loads it
-import tui_gateway.server  # noqa: F401
-from tui_gateway import methods_groups
-from gateway.run_startup import GatewayStartupMixin
-from hermes_cli import plugins
+def report():
+    time.sleep(float(os.environ.get("CHECK_AFTER", "25")))
+    groups = sys.modules.get("tui_gateway.methods_groups")
+    service = groups.get_hosted_room_service() if groups else None
+    startup = sys.modules.get("gateway.run_startup")
+    method = startup.GatewayStartupMixin.__dict__.get("_start_hosted_room_worker_sync") if startup else None
+    print(f"\n=== REPORT ({'with' if WITH_PLUGIN else 'without'} plugin): room worker {'RUNNING' if service else 'not running'}; "
+          f"start method patched: {bool(method and getattr(method.__func__, '__hermes_bot_fixes__', False))}", flush=True)
+    try:
+        log = (home / "logs" / "agent.log").read_text() if (home / "logs" / "agent.log").exists() else ""
+        for line in log.splitlines():
+            if "hermes-bot-fixes" in line and ("rooms" in line or "room worker" in line):
+                print("LOG:", line[-170:], flush=True)
+    except Exception as error:
+        print("log read failed", error, flush=True)
+    shutil.rmtree(home, ignore_errors=True)
+    os._exit(0)
 
-original = GatewayStartupMixin.__dict__["_start_hosted_room_worker_sync"]
-# A worker already running in the gateway before the plugin loads, started the gateway's own way.
-service = original.__func__()
-assert methods_groups.get_hosted_room_service() is not None, "the gateway's own start should run a worker"
-
-plugins.get_plugin_manager().discover_and_load(force=True)
-assert GatewayStartupMixin.__dict__["_start_hosted_room_worker_sync"] is not original, "the start method was not replaced"
-assert GatewayStartupMixin._start_hosted_room_worker_sync() is None
-assert methods_groups.get_hosted_room_service() is None, "the running gateway worker was not stopped"
-assert GatewayStartupMixin._start_hosted_room_worker_sync() is None and methods_groups.get_hosted_room_service() is None
-
-# The dashboard starts its worker through methods_groups directly: untouched.
-dash = methods_groups.start_hosted_room_service()
-assert dash is not None and dash.runtime.status().get("running"), "the dashboard's own start should still work"
-methods_groups.stop_hosted_room_service(timeout=5.0)
-shutil.rmtree(home, ignore_errors=True)
-print("ok: the gateway runs no room worker; the dashboard still does")
+threading.Thread(target=report, daemon=True).start()
+sys.argv = ["hermes", "gateway", "run"]
+runpy.run_module("hermes_cli.main", run_name="__main__", alter_sys=True)
