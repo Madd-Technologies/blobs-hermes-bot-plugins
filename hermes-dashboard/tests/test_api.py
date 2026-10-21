@@ -112,6 +112,31 @@ class Api(unittest.TestCase):
         self.assertEqual(self.client.post(url, json={}).status_code, 400)
         self.assertEqual(self.client.post(f"{self.base}/records/{self.record['id']}/actions/nope", json={}).status_code, 404)
 
+    def test_an_approval_button_needs_the_digest_the_app_drew(self):
+        S, store = self.S, self.module._store()[1]
+        bot = S.Actor.bot("concierge")
+        store.update_collection(bot, "support-emails", {"add_fields": [{"key": "reply", "label": "Reply", "type": "draft", "format": "html", "approve": True}], "actions": [{"id": "send", "label": "Send reply", "prompt": "Send it.", "draft": "reply"}]})
+        store.update(bot, self.record["id"], {"reply": "<p>Hi Sam</p>"})
+        record = self.client.get(f"{self.base}/records/{self.record['id']}").json()
+        digest = record["approvals"]["reply"]["digest"]
+        url = f"{self.base}/records/{self.record['id']}/actions/send"
+
+        stale = self.client.post(url, json={"digest": "0" * 64})
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["digest"], digest)
+        self.assertEqual(self.client.post(url, json={}).status_code, 409, "an app too old to approve can't press it")
+
+        pressed = self.client.post(url, json={"digest": digest}).json()
+        self.assertEqual(pressed["approved"], digest)
+
+    def test_a_number_opens_a_page(self):
+        S, store = self.S, self.module._store()[1]
+        store.set_view(S.Actor.bot("concierge"), {"id": "open", "title": "Open emails", "kind": "number", "collection": "support-emails", "config": {"opens": True}})
+        page = self.client.get(f"{self.base}/bots/concierge/views/open/page").json()
+        self.assertEqual((page["kind"], page["count"], page["rows"][0]["id"]), ("list", 1, self.record["id"]))
+        self.assertEqual(self.client.get(f"{self.base}/bots/concierge/views/inbox/page").status_code, 400, "a list opens its full view, not a page")
+        self.assertEqual(self.client.get(f"{self.base}/bots/concierge/views/nope/page").status_code, 404)
+
     def test_muting_a_record(self):
         url = f"{self.base}/records/{self.record['id']}/mute"
         until = int(__import__("time").time()) + 3600

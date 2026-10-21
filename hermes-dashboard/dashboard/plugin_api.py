@@ -1,5 +1,6 @@
-"""The phone's side of hermes-dashboard: each bot's dashboard computed, a record with its history, and the person's actions
-on a record (change fields, add a note, close or reopen). The person never creates records or views; bots do.
+"""The phone's side of hermes-dashboard: each bot's dashboard computed, a record with its history, the page a number,
+chart or stat opens, and the person's actions on a record (change fields, add a note, close or reopen, press a button,
+approving exactly the draft it sends). The person never creates records or views; bots do.
 
 Reading dashboards first mirrors the kanban board into each bot's Background work (`kanban.py`, at most every 15 s), and a
 note on a card's record is posted on the card as the person's answer.
@@ -17,6 +18,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 _PACKAGE = "_hermes_dashboard_package"
@@ -69,6 +71,9 @@ def _guard(call):
 
     try:
         return call(S, store)
+    except S.Changed as error:
+        # The draft the person approved is no longer the one stored: 409 with the digest now, so the app shows the new one.
+        return JSONResponse(status_code=409, content={"detail": str(error), "digest": error.current})
     except S.NotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from None
     except S.DashboardError as error:
@@ -121,6 +126,14 @@ async def bot_needs_you(profile: str) -> dict:
     return _guard(lambda S, store: {"profile": profile, "records": store.needs_you_records(profile), "now": int(time.time())})
 
 
+@router.get("/bots/{profile}/views/{view_id}/page")
+async def page(profile: str, view_id: str, bucket: str | None = None, metric: int | None = None, offset: int = 0) -> dict:
+    """The page a number, chart or stat opens: `{id, title, kind: list|table|board, panel, count, rows|columns, next,
+    group_by?, period?, start?, end?, metric?, fields, live, now}`. `bucket` names a chart's bar (its start date), `metric`
+    a stat's metric (from 0). Rows open records; nothing on a page opens another page."""
+    return _guard(lambda S, store: store.page(profile, view_id, bucket=bucket, metric=metric, offset=offset))
+
+
 @router.get("/records/{record_id}")
 async def record(record_id: str) -> dict:
     return _guard(lambda S, store: {**store.get_record(S.Actor.person(), record_id), "now": int(time.time())})
@@ -164,12 +177,15 @@ async def mute(record_id: str, body: Mute) -> dict:
 
 class Press(BaseModel):
     session: str | None = None
+    digest: str | None = None
 
 
 @router.post("/records/{record_id}/actions/{action_id}")
 async def press(record_id: str, action_id: str, body: Press) -> dict:
-    """A button on a record: answers the message for the bot, which the app sends in the side chat `session`."""
-    return _guard(lambda S, store: store.start_action(S.Actor.person(), record_id, action_id, body.session))
+    """A button on a record: answers the message for the bot, which the app sends in the side chat `session`. For a
+    button whose draft the person approves, `digest` is the draft's digest as the app drew it: 409 `{detail, digest}`
+    when it changed since (nothing starts), else the approval is stored (`approved`)."""
+    return _guard(lambda S, store: store.start_action(S.Actor.person(), record_id, action_id, body.session, body.digest))
 
 
 @router.post("/records/{record_id}/close")

@@ -132,6 +132,32 @@ feed or change-gated job, record the `feed`, and tell them what you track, what 
 
 Three to six panels that matter beat many. Put what needs them first.
 
+**A number, chart or stat can open a page of its records.** Give a number or chart `opens: true` (or `{kind: list|table|board,
+title, show, sort, columns, group_by}`: group arrivals by their date, tasks by their stage) and tapping it lists exactly the
+records it counts; a chart's bar opens that bar's records. A stat with a `collection` may give a metric `opens: {filter}`.
+A page holds only records, so the person goes dashboard, page, record and never deeper. Don't build a second panel just to
+list what a number counts: let the number open it.
+
+## Laying out a record
+
+Every record opens on a screen the app draws in its own design. By default that is the title, one text field as its body,
+then the fields as rows. When a collection deserves better (a task with a question, an email with its attachments), give
+it a `layout` of blocks, in the order to show them (`dashboard_collection` `update` with `layout`):
+
+- `{block: header, meta: "status", byline?}`: your face, the title, a meta line; `byline` names a text field naming another
+  bot ("asked by").
+- `{block: ask, field: "question", choices: "options", answer: "note", when?}`: a question that rises while the record needs
+  your person, with one-tap choices from a `list` field. Their answer comes to you as a note (or into the field `answer`
+  names).
+- `{block: text, field, label, fold}`: a longtext in its format; `fold: 2` shows two lines and "More".
+- `{block: fields, fields: [...], label}`, `{block: files, field}`, `{block: draft, field}`, `{block: entries, field, label}`
+  (dated lines such as attempts), `{block: notes, label}`.
+- `tray`: `{composer: true}` (a box at the bottom that adds a note and answers the ask) or `{primary: "<button id>"}` (the
+  white pill), plus `secondary` (`ask`, `done`, button ids).
+
+You change the structure, never the style: the app draws every block. Use `format: markdown` on longtext you write with
+headings or lists, and keep `readonly: true` on fields only you keep.
+
 Rows can carry a **signal**, a small green, amber or red dot that answers one question at a glance (has this order
 shipped? is this invoice paid?). Give the view `signals`, a list of `{when: <filter>, tone: good|warn|bad}`; the first that
 matches a row is its dot, and done or muted rows carry none. For example: good when `shipped` is true, bad when it is
@@ -151,6 +177,16 @@ When you could do the next step for them (reply to an email, book the vendor, fi
   `[Dashboard button "<label>" · <record>]`. Do exactly that job (Hermes asks them to approve as usual), then finish on the
   record: update the status and add a note saying what you did, or why you couldn't.
 
+## Approvals bound to exactly what goes out
+
+When pressing a button sends something on their behalf (an email, a post, a payment request), make the draft one they
+approve: `{key: "reply", type: "draft", format: "html", to: "email", approve: true, attachments: "files", covers: ["subject",
+"cc"]}`. The app draws it exactly as it will go out (HTML in a sealed view, attachments listed with their sizes) with its
+digest, and pressing the button is their approval of that exact version: the side chat says "approval digest …". Send
+exactly what is on the record; if a tool checks approvals, it compares the digest. Then report it: `dashboard_record`
+`report` with `outcome: sent` and the digest of what went out (or `refused` and why), so they see "Sent exactly what you
+approved". If you change the draft after they approved, they must approve again.
+
 ## Reviews and approvals: anything that needs their sign-off
 
 Whenever you have something your person should look at or approve (a report, a quote, a contract, a draft post, an invoice,
@@ -162,9 +198,14 @@ once. One review collection can hold every kind of document you produce for them
 ## Background work: your kanban cards
 
 If you queue work on Hermes's kanban board (`kanban_create`, assigned to yourself), the plugin copies your open cards into
-a **Background work** collection on your dashboard by itself. Don't write to it, reshape it or retire it: it follows the
-board. A blocked card needs your person there; their note on its record is posted on the card as their answer and unblocks
-it, so the next worker reads it. To answer a card yourself, use the kanban tools, not `dashboard_record`.
+a **Background work** collection on your dashboard by itself: the task, who asked, what it has done, its attempts and its
+comments. Don't write to it, reshape it or retire it: it follows the board. A blocked card needs your person there; their
+answer on its record is posted on the card and unblocks it, so the next worker reads it. To answer a card yourself, use
+the kanban tools, not `dashboard_record`.
+
+**When a worker blocks a card with a question, offer the answers.** End the block reason with a line like
+`Options: Airbnb only | Both, mark VRBO` (or `Options:` with a short list under it): the app shows them as one-tap choices.
+Write the question in plain words for your person, not for another worker: no file paths or task ids.
 
 ## Keeping it right
 
