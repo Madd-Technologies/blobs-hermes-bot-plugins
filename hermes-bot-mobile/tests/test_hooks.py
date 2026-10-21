@@ -158,6 +158,44 @@ class Questions(Setup):
         self.assertEqual(self.net.calls, [])
 
 
+class RoomQuestions(Setup):
+    """A group room member can't be answered through clarify (no app is attached to its turn), so it asks in the room."""
+
+    def test_a_room_members_clarify_is_turned_back_with_how_to_ask_instead(self):
+        self.context.update(source="bot_room", room="r-garden")
+        answer = self.hooks.vetoes()["pre_tool_call"](tool_name="clarify", args={"question": "Deploy now?"}, tool_call_id="c1")
+        self.assertEqual(answer["action"], "block")
+        self.assertIn("@you", answer["message"])
+        # And nothing is pushed for a question that never reaches the person.
+        self.hooks.on_tool(tool_name="clarify", args={"question": "Deploy now?"}, tool_call_id="c1")
+        self.assertEqual(self.net.calls, [])
+
+    def test_a_member_whose_room_cannot_be_told_is_turned_back_too(self):
+        self.context.update(source="bot_room")
+        self.assertEqual(self.hooks.room_clarify(tool_name="clarify")["action"], "block")
+
+    def test_clarify_in_a_chat_and_other_tools_in_a_room_go_ahead(self):
+        self.assertIsNone(self.hooks.room_clarify(tool_name="clarify"))
+        self.context.update(source="bot_room", room="r-garden")
+        self.assertIsNone(self.hooks.room_clarify(tool_name="terminal"))
+
+    def test_a_failing_veto_lets_the_tool_go_ahead(self):
+        self.hooks._context = mock.Mock(side_effect=RuntimeError("no context"))
+        self.assertIsNone(self.hooks.vetoes()["pre_tool_call"](tool_name="clarify"))
+
+    def test_a_room_message_that_asks_you_is_a_question_that_opens_the_room(self):
+        self.context.update(source="bot_room", room="r-garden")
+        self.hooks.on_reply(session_id="s1", turn_id="t1", platform="bot_room", user_message="[Discussion]", assistant_response="@you Deploy the fix now, or wait for tomorrow?")
+        (message,) = self.sent()
+        self.assertEqual(message["type"], "Questions")
+        self.assertEqual(message["url"], "hermesbot://room/r-garden")
+
+    def test_other_room_messages_are_not_pushed(self):
+        self.context.update(source="bot_room", room="r-garden")
+        self.hooks.on_reply(session_id="s1", turn_id="t1", platform="bot_room", assistant_response="@forge can you check the logs?")
+        self.assertEqual(self.net.calls, [])
+
+
 class NoNewsIsNotPushed(Setup):
     """That a turn finished or a routine ran is never a push: they show on Home and in the bot's routines."""
 
@@ -413,7 +451,7 @@ class WhereATapLands(Setup):
 
     def test_a_room_member_whose_room_cannot_be_told_opens_needs_you_not_its_hidden_session(self):
         self.context.update(source="bot_room")
-        self.hooks.on_tool(tool_name="clarify", args={"question": "Which?"}, tool_call_id="c3", session_id="20260102_120200_77aa00")
+        self.hooks.on_approval(command="rm x", description="delete", session_key="20260102_120200_77aa00", surface="gateway", pattern_key="rm")
         self.assertEqual(self.sent()[0]["url"], "hermesbot://inbox")
 
     def test_a_gateway_session_key_is_not_a_chat(self):

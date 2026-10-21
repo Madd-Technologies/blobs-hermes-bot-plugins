@@ -45,6 +45,15 @@ the `on_room_member_activity` hook (Hermes 0.21.5+) this keeps what each bot is 
 name), thinking, writing, or waiting for your OK. Only the phase, the tool's name and when it began are kept, never text,
 tool arguments or output, in one small file per room, written only when a phase changes.
 
+## Questions in a group room
+
+Nobody can answer a room member's `clarify`: its turn runs on a hidden session no app is attached to (often in the messaging
+gateway, not the dashboard the app talks to), so the question waits for Hermes's clarify timeout (an hour by default) while
+the room shows the bot as still writing. Since 0.1.10 a `pre_tool_call` hook turns a room member's `clarify` back with how to
+ask instead: a message that addresses the person as `@you`, with the choices in plain words, which the app shows as waiting
+on them. Such a message is pushed as a question that opens the room; nothing is pushed for the turned-back `clarify`.
+Clarify in the person's own chats is untouched.
+
 ## Needs you, pushed
 
 Since 0.1.7 the app's Needs you is pushed, not polled. Hermes keeps every prompt it has put to a client (an approval, a

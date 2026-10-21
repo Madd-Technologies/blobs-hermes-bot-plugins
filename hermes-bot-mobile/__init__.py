@@ -29,7 +29,7 @@ def register(ctx) -> None:
     hooks = PushHooks()
     watched = []
 
-    for name, callback in hooks.callbacks().items():
+    for name, callback in [*hooks.callbacks().items(), *hooks.vetoes().items()]:
         # One hook this Hermes doesn't have (kanban_task_blocked needs 0.21.5+) must not cost the others.
         try:
             ctx.register_hook(name, callback)

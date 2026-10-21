@@ -47,6 +47,19 @@ NOT_FOR_THE_PERSON = (
     re.compile(r"^Message from (?:agent '|🤖)"),
 )
 
+#: What a group room member is told when it reaches for `clarify`. A member's turn runs on a hidden session no app is
+#: attached to (often in the messaging gateway, not the dashboard the app talks to), so the question would wait unanswered
+#: for Hermes's clarify timeout (an hour by default) while the room shows the bot as still writing. The room already
+#: has a way to ask: a message that addresses the person as @you, which the app shows as waiting on them.
+ROOM_CLARIFY = (
+    "clarify is not available in a group room: nobody can answer it there, so it would wait unanswered for up to an hour. "
+    "Ask in your reply instead: address the person as @you, put the question and its choices in plain words, and end "
+    "your turn. Their answer comes as their next message in the room."
+)
+
+#: A room message that addresses the person, as the app reads it (`@you` or `@user`).
+AT_YOU = re.compile(r"(^|[^A-Za-z0-9_])@(you|user)(?![A-Za-z0-9_-])", re.IGNORECASE)
+
 #: Replies that say nothing: a room member passing, a routine told to stay quiet.
 SILENT_REPLIES = frozenset({"(pass)", "[silent]", "silent"})
 
@@ -320,8 +333,22 @@ class PushHooks:
         target = self._target(session_key, kw.get("session_id"))
         self._emit("approval", key, detail=notify.describe(kw.get("description", ""), command), session=target.get("chat") or session_key, target=target)
 
+    def _in_room(self) -> bool:
+        context = self._context()
+
+        return bool(context["room"]) or context["source"] == "bot_room"
+
+    def room_clarify(self, **kw) -> dict | None:
+        """`pre_tool_call` veto: a group room member's `clarify` is turned back with how to ask in the room instead (see
+        ROOM_CLARIFY). Anything else goes ahead."""
+        if kw.get("tool_name") != "clarify" or not self._in_room():
+            return None
+
+        return {"action": "block", "message": ROOM_CLARIFY}
+
     def on_tool(self, **kw) -> None:
-        if kw.get("tool_name") != "clarify":
+        # A room member's question is turned back (room_clarify) and asked in the room, which pushes on its own.
+        if kw.get("tool_name") != "clarify" or self._in_room():
             return
 
         key = str(kw.get("tool_call_id") or kw.get("session_id") or "")
@@ -329,7 +356,20 @@ class PushHooks:
         self._emit("question", key, detail=notify.tidy(question_text(kw.get("args"))), session=target.get("chat") or str(kw.get("session_id") or ""), target=target)
 
     def on_reply(self, **kw) -> None:
-        """A bot gave its final answer in one of the person's chats (`post_llm_call`): its first words, like a message."""
+        """A bot gave its final answer in one of the person's chats (`post_llm_call`): its first words, like a message. In a
+        group room only a message that asks the person something (@you) is pushed, as a question that opens the room."""
+        context = self._context()
+
+        if context["room"] or context["source"] == "bot_room":
+            answer = str(kw.get("assistant_response") or "").strip()
+
+            if AT_YOU.search(answer):
+                target = self._target()
+                turn = str(kw.get("turn_id") or kw.get("task_id") or notify.notification_id(answer))
+                self._emit("question", f"{target.get('room') or 'room'}:{turn}", detail=notify.preview(answer), target=target)
+
+            return
+
         if str(kw.get("platform") or "").lower() not in CHAT_PLATFORMS:
             return
 
@@ -378,6 +418,22 @@ class PushHooks:
         profile = str(kw.get("assignee") or kw.get("profile_name") or "")
         # The Needs you list, where the app shows the card (its dashboard copies it from the board when it is read).
         self._emit("blocked", f"{kw.get('board') or 'default'}/{task}:{kw.get('run_id')}", detail=notify.tidy(detail), target={"inbox": True}, profile=profile)
+
+    def vetoes(self) -> dict:
+        """Hook name -> callback whose answer Hermes acts on (a `pre_tool_call` block). A failure answers nothing, so the tool
+        goes ahead as if the plugin were not there."""
+        def guard(callback):
+            def run(**kw):
+                try:
+                    return callback(**kw)
+                except Exception:
+                    log.exception("hermes-bot-mobile hook failed")
+
+                    return None
+
+            return run
+
+        return {"pre_tool_call": guard(self.room_clarify)}
 
     def callbacks(self) -> dict:
         """Hook name -> callback, each wrapped so that nothing it does can reach the bot."""
