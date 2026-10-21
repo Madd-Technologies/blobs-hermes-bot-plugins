@@ -78,6 +78,14 @@ def tell_bot(root: Path, profile: str, line: str, key: str) -> str:
     home = Path(root) if profile == "default" else Path(root) / "profiles" / profile
 
     try:
+        from tools import bot_live_delivery as live
+    except Exception:
+        return "failed"
+
+    if not hasattr(live, "find_canonical_owner"):
+        return _tell_authority(live, home, line, key)
+
+    try:
         from tools.bot_live_delivery import deliver_to_live_owner, find_canonical_live_owner, find_canonical_owner
     except Exception:
         return "failed"
@@ -94,6 +102,37 @@ def tell_bot(root: Path, profile: str, line: str, key: str) -> str:
         return "failed"
 
     return _headless_turn(Path(root), profile, home, line)
+
+
+def _tell_authority(live: types.ModuleType, home: Path, line: str, key: str) -> str:
+    """Hermes 0.22+: the profile's gateway owns its chats. It admits the delivery into Bot Chat's queue at once, durably,
+    behind any turn already there, and makes Bot Chat if the bot has none yet. The delivery id makes a retry safe: the same
+    id and message return the receipt already given. A gateway that is not up yet means try later."""
+    try:
+        owner = live.find_canonical_live_owner(home)
+    except ValueError:
+        return "busy"
+    except Exception as error:
+        log.warning("hermes-phone: Bot Chat lookup failed (%s)", type(error).__name__)
+        return "failed"
+
+    if owner is None:
+        log.warning("hermes-phone: the bot has no Hermes store to deliver to")
+        return "failed"
+
+    try:
+        receipt = live.deliver_to_live_owner(home, owner, line, delivery_id=key, author=AUTHOR)
+    except ValueError:
+        # Includes PreDialError: nothing reached the gateway, so the same delivery is safe to send again.
+        return "busy"
+    except Exception as error:
+        log.warning("hermes-phone: delivery to Bot Chat failed (%s)", type(error).__name__)
+        return "failed"
+
+    if isinstance(receipt, dict) and receipt.get("admission_id"):
+        return "delivered"
+
+    return "busy"
 
 
 def _child_env(home: Path) -> Dict[str, str]:
