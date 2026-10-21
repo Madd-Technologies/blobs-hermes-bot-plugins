@@ -50,17 +50,43 @@ def _button_list(collection: dict) -> str:
 
 FIELD_SCHEMA = {
     "type": "object",
-    "description": "A field: {key, label, type, required?}. status needs stages [{name, done}] (at least one open, one done); choice needs options; money may set currency; draft (text you wrote for your person to send or use, shown in full and editable) may set to: the key of the field naming who it is for.",
+    "description": (
+        "A field: {key, label, type, required?, readonly?}. status needs stages [{name, done}] (at least one open, one done); "
+        "choice needs options; money may set currency; longtext and draft may set format: plain, markdown or html; draft (text "
+        "you wrote for your person to send or use, shown in full and editable) may set to (the field naming who it is for), "
+        "approve: true (its button is your person's approval of exactly this content: an email to send), attachments (a files "
+        "field sent with it) and covers (other fields that are part of what is approved, like subject). list is short texts "
+        "(choices), entries is dated lines [{label, detail?, at?, tone?: good|warn|bad}], files is [{name, path or url, mime?, "
+        "size?, sha256?}]. readonly: your person can't change it in the app."
+    ),
     "properties": {
         "key": {"type": "string"},
         "label": {"type": "string"},
-        "type": {"type": "string", "enum": ["text", "longtext", "number", "money", "percent", "date", "datetime", "checkbox", "status", "choice", "phone", "email", "url", "link", "rating", "draft"]},
+        "type": {"type": "string", "enum": ["text", "longtext", "number", "money", "percent", "date", "datetime", "checkbox", "status", "choice", "phone", "email", "url", "link", "rating", "draft", "list", "entries", "files"]},
         "required": {"type": "boolean"},
+        "readonly": {"type": "boolean"},
         "stages": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "done": {"type": "boolean"}}}},
         "options": {"type": "array", "items": {"type": "string"}},
         "currency": {"type": "string"},
         "to": {"type": "string"},
+        "format": {"type": "string", "enum": ["plain", "markdown", "html"]},
+        "approve": {"type": "boolean"},
+        "attachments": {"type": "string"},
+        "covers": {"type": "array", "items": {"type": "string"}},
     },
+}
+
+LAYOUT_SCHEMA = {
+    "type": "object",
+    "description": (
+        "create/update: how each record's screen is laid out, from blocks the app draws in its own design (null: the standard "
+        "screen). {blocks: [...], tray?}. Blocks: {block: header, meta?, byline?} first; {block: ask, field (the question), "
+        "choices? (a list field), answer?: note (default) or a field, when?: filter (default: while it needs your person)}; "
+        "{block: text, field, label?, format?, fold?: lines}; {block: fields, fields: [keys], label?}; {block: files, field}; "
+        "{block: draft, field}; {block: entries, field, label?}; {block: notes, label?, history?: notes|all}. tray: "
+        "{composer: true (a box that adds a note and answers the ask) | primary: a button id or next_stage, secondary?: up to 3 "
+        "of ask, done, button ids, placeholder?}."
+    ),
 }
 
 ACTION_SCHEMA = {
@@ -98,10 +124,11 @@ COLLECTION_SCHEMA = {
             "description": {"type": "string"},
             "fields": {"type": "array", "items": FIELD_SCHEMA, "description": "create: the fields."},
             "add_fields": {"type": "array", "items": FIELD_SCHEMA},
-            "change_fields": {"type": "array", "items": {"type": "object"}, "description": "{key, label?, stages?, options?, required?}; a type never changes."},
+            "change_fields": {"type": "array", "items": {"type": "object"}, "description": "{key, label?, stages?, options?, required?, format?, readonly?, approve?, attachments?, covers?}; a type never changes."},
             "retire_fields": {"type": "array", "items": {"type": "string"}},
             "actions": {"type": "array", "items": ACTION_SCHEMA, "description": "create/update: the buttons (up to 4); update replaces the whole list."},
             "feed": {"type": "object", "description": "create/update: how this collection is kept fresh, shown to your person: {how: script (a no_agent cron job using write.py) | model_on_change (an agent job gated by a monitor_script) | model_timer (last resort), job: the cron job id, every: e.g. 5m}."},
+            "layout": LAYOUT_SCHEMA,
             "profile": {"type": "string", "description": "share/unshare: the other bot's profile name."},
             "can_write": {"type": "boolean", "description": "share: whether that bot may add and change records."},
         },
@@ -111,17 +138,21 @@ COLLECTION_SCHEMA = {
 
 RECORD_SCHEMA = {
     "name": "dashboard_record",
-    "description": "Add or change records in a collection. upsert adds records or updates the one with the same source_key (use the source's own id, e.g. the email's message id, so nothing is added twice). Fields your person changed are kept unless override_person. close/reopen move the status to its first done/open stage. note adds a note to the record's history.",
+    "description": "Add or change records in a collection. upsert adds records or updates the one with the same source_key (use the source's own id, e.g. the email's message id, so nothing is added twice). Fields your person changed are kept unless override_person. close/reopen move the status to its first done/open stage. note adds a note to the record's history. report says what happened to a draft your person approved: outcome sent (digest: what went out) or refused (detail: why), so they see whether it matched.",
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["upsert", "update", "close", "reopen", "note", "get"]},
+            "action": {"type": "string", "enum": ["upsert", "update", "close", "reopen", "note", "get", "report"]},
             "collection": {"type": "string", "description": "upsert: the collection."},
             "records": {"type": "array", "items": {"type": "object", "properties": {"source_key": {"type": "string"}, "values": {"type": "object"}}}, "description": "upsert: up to 100 records, each {source_key, values}."},
             "record_id": {"type": "string", "description": "update/close/reopen/note/get: the record."},
             "values": {"type": "object", "description": "update: field key → value."},
             "note": {"type": "string"},
             "override_person": {"type": "boolean", "description": "Overwrite fields your person changed. Only when they asked you to."},
+            "draft": {"type": "string", "description": "report: the draft field."},
+            "digest": {"type": "string", "description": "report: the approval digest of what went out."},
+            "outcome": {"type": "string", "enum": ["sent", "refused"], "description": "report"},
+            "detail": {"type": "string", "description": "report: why it was refused, or where it went."},
         },
         "required": ["action"],
     },
@@ -156,7 +187,10 @@ VIEW_SCHEMA = {
         "value, change}]}. needs_you is a filter: matching open records light the amber dot. signals (list, checklist, board, "
         "table) gives each row a small colored dot: [{when: <filter>, tone: good|warn|bad}], first match wins, e.g. good once "
         "an email is sent, bad when it is still unsent and the date is within_days 1, warn otherwise; done and muted rows "
-        "carry none. show.link names a url field a "
+        "carry none. OPENS: a number or chart may set opens: true or {kind: list|table|board, title?, show?, sort?, columns?, "
+        "group_by? (a date, status or choice field)}, and tapping it opens a page of the records it counts (a chart: the bar's "
+        "records); a stat with a collection may give a metric opens: {filter}. A page holds only records: dashboard, page, "
+        "record. show.link names a url field a "
         "row opens. LIVE PANELS: instead of collection, give source {kind: sqlite (path in your Hermes folder, query: one "
         "SELECT) | json (url, rows: path to the list) | ics (url or path, days) | script (a file in your scripts/ folder "
         "that prints JSON), ttl: seconds (default 60), fields: {key: type} to override inferred types}; list, table, "
@@ -276,7 +310,11 @@ class DashboardTools:
             if action == "get":
                 return store.get_record(actor, record_id)
 
-            raise S.DashboardError("action must be upsert, update, close, reopen, note or get")
+            if action == "report":
+                result = store.report(actor, record_id, args.get("draft"), args.get("digest"), str(args.get("outcome") or ""), args.get("detail"))
+                return {**result, "message": ("Reported. It matches what your person approved." if result["matched"] else "Reported. It does NOT match what your person approved; they will see that.") if result["outcome"] == "sent" else "Reported: nothing was sent."}
+
+            raise S.DashboardError("action must be upsert, update, close, reopen, note, get or report")
 
         return self._call(run)
 

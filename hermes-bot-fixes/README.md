@@ -59,6 +59,16 @@ and logged), so a newer Hermes that changed it simply goes unpatched.
   - Unchanged: messages from bots on other machines (peers, relay, another connection), routines and Kanban.
   - To switch it off (say, once Hermes itself does this), put `HERMES_BOT_FIXES_BOT_INBOX=off` in `~/.hermes/.env` and
     restart the dashboard and the messaging gateway; messages then run in the main chat exactly as Hermes runs them.
+- **A group room's questions and approvals never reach the app.** Hermes 0.21.6 runs a group-room worker in both the
+  dashboard and the messaging gateway, and whichever leases a room first runs every bot's turn in it (after a restart,
+  the process that came up first; later, whichever grabs a lease that lapsed). When the gateway has the room, a bot's
+  approval waits in the gateway's own room service and its `clarify` question in the gateway's open requests: the app,
+  which talks to the dashboard, shows neither, and the turn waits for the prompt's timeout while the room looks busy.
+  Now the messaging gateway starts no room worker (and stops one already running, letting a turn it accepted finish),
+  so its leases lapse and the dashboard runs every room. Questions, approvals and the rest of a room work as before.
+  - The gateway keeps everything else: routines, Kanban workers, heartbeats, messaging platforms. Only group chats on a
+    messaging platform stop, as Hermes does when its room worker is down; the app's rooms are not those.
+  - To switch it off, put `HERMES_BOT_FIXES_GATEWAY_ROOMS=on` in `~/.hermes/.env` and restart the messaging gateway.
 
 ## Install
 

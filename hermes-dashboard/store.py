@@ -23,15 +23,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
+    from . import approvals as A
     from . import fields as F
+    from . import layout as Y
     from . import query as Q
     from . import sources as L
 except ImportError:  # the tests and the writer import the modules flat
+    import approvals as A  # type: ignore[no-redef]
     import fields as F  # type: ignore[no-redef]
+    import layout as Y  # type: ignore[no-redef]
     import query as Q  # type: ignore[no-redef]
     import sources as L  # type: ignore[no-redef]
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MAX_COLLECTIONS = 50
 MAX_OPEN_RECORDS = 5000
 MAX_VIEWS = 30
@@ -84,14 +88,15 @@ CREATE TABLE IF NOT EXISTS kanban_cards (
   PRIMARY KEY (board, task)
 );
 CREATE INDEX IF NOT EXISTS kanban_cards_record ON kanban_cards (record);
-"""
+""" + A.TABLE
 
 
 def _migrate(conn) -> None:
     """Schema 2 adds a collection's buttons (`actions`) and the button job a record waits on (`running`); schema 3 the time
     a record the person muted speaks up again (`muted_until`); schema 4 how a collection is kept fresh (`feed`); schema 5
-    the kanban cards mirrored into records (`kanban_cards`, a new table the schema script creates)."""
-    for table, column, kind in (("collections", "actions", "TEXT NOT NULL DEFAULT '[]'"), ("records", "running", "TEXT"), ("records", "muted_until", "INTEGER"), ("collections", "feed", "TEXT")):
+    the kanban cards mirrored into records (`kanban_cards`, a new table the schema script creates); schema 6 a collection's
+    record layout (`layout`), the person's approvals (`approvals`, a new table) and the card comments mirrored as notes."""
+    for table, column, kind in (("collections", "actions", "TEXT NOT NULL DEFAULT '[]'"), ("records", "running", "TEXT"), ("records", "muted_until", "INTEGER"), ("collections", "feed", "TEXT"), ("collections", "layout", "TEXT"), ("kanban_cards", "comments_seen", "INTEGER NOT NULL DEFAULT 0")):
         if column not in {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
@@ -102,6 +107,14 @@ class DashboardError(ValueError):
 
 class NotFound(LookupError):
     pass
+
+
+class Changed(DashboardError):
+    """The person approved a version of a draft that is no longer the one stored: they must look again."""
+
+    def __init__(self, message: str, current: str):
+        super().__init__(message)
+        self.current = current
 
 
 @dataclass(frozen=True)
@@ -191,6 +204,14 @@ def _clean_feed(raw) -> dict | None:
 
 
 SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+DIGEST = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _clean_layout(raw, fields: list[dict], actions: list[dict]) -> dict | None:
+    try:
+        return Y.clean_layout(raw, fields, actions)
+    except (Y.LayoutError, F.FieldError) as error:
+        raise DashboardError(f"layout: {error}") from None
 
 
 def _clean_actions(raw, fields: list[dict]) -> list[dict]:
@@ -249,6 +270,15 @@ def _offered(action: dict, record: dict, fields: list[dict], now: float) -> bool
 
 def _plain(field: dict, value) -> str:
     """A value in words for the message a pressed button sends the bot."""
+    if field["type"] == "list" and isinstance(value, list):
+        return "; ".join(str(item) for item in value)
+
+    if field["type"] == "entries" and isinstance(value, list):
+        return "; ".join(f"{item.get('label')}" + (f" ({item['detail']})" if item.get("detail") else "") for item in value if isinstance(item, dict))
+
+    if field["type"] == "files" and isinstance(value, list):
+        return "; ".join(f"{item.get('name')} ({item.get('path') or item.get('url')})" for item in value if isinstance(item, dict))
+
     if field["type"] == "datetime" and isinstance(value, (int, float)):
         return time.strftime("%a %Y-%m-%d %H:%M", time.localtime(value))
 
@@ -261,7 +291,7 @@ def _plain(field: dict, value) -> str:
     return str(value)
 
 
-def action_message(collection: dict, record: dict, action: dict, show: dict) -> str:
+def action_message(collection: dict, record: dict, action: dict, show: dict, approved: str | None = None) -> str:
     """What a pressed button asks the bot, sent in a fresh side chat: the job, the record as it is now (with the person's
     edited draft word for word) and how to finish. Its first line is what the app shows in that chat."""
     values = record["values"]
@@ -290,7 +320,11 @@ def action_message(collection: dict, record: dict, action: dict, show: dict) -> 
             continue
 
         edited = "your person edited it; use it exactly as written" if field["key"] in record["person_fields"] else "use it exactly as written"
-        lines += ["", f"{field['label']} ({edited}):", '"""', str(value), '"""']
+        written = f" in {field['format']}" if field.get("format") in ("markdown", "html") else ""
+        lines += ["", f"{field['label']}{written} ({edited}):", '"""', str(value), '"""']
+
+        if approved and field["key"] == action.get("draft"):
+            lines.append(f"Your person approved exactly this {field['label'].lower()} (approval digest {approved}). Send it exactly as stored on the record: a sending tool that checks approvals compares this digest, and refuses anything else.")
 
     lines += [
         "",
@@ -381,6 +415,7 @@ class Store:
             "fields": json.loads(row["fields"]),
             "actions": json.loads(row["actions"] or "[]"),
             "feed": json.loads(row["feed"]) if row["feed"] else None,
+            "layout": json.loads(row["layout"]) if row["layout"] else None,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "retired": bool(row["retired_at"]),
@@ -436,6 +471,7 @@ class Store:
 
         actions = _clean_actions(raw.get("actions"), fields)
         feed = _clean_feed(raw.get("feed"))
+        layout = _clean_layout(raw.get("layout"), fields, actions)
         now = self._now()
 
         with self._db(write=True) as conn:
@@ -450,8 +486,8 @@ class Store:
                 raise DashboardError(f"collection {cid!r} exists; change it with action update")
 
             conn.execute(
-                "INSERT INTO collections (key, owner, id, title, description, fields, actions, feed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (key, actor.name, cid, title, _text(raw.get("description"), "description", 300), _dump(fields), _dump(actions), _dump(feed) if feed else None, now, now),
+                "INSERT INTO collections (key, owner, id, title, description, fields, actions, feed, layout, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (key, actor.name, cid, title, _text(raw.get("description"), "description", 300), _dump(fields), _dump(actions), _dump(feed) if feed else None, _dump(layout) if layout else None, now, now),
             )
 
             return self._collection(conn.execute("SELECT * FROM collections WHERE key = ?", (key,)).fetchone())
@@ -483,7 +519,7 @@ class Store:
                 if change.get("type") and change["type"] != fields[key]["type"]:
                     raise DashboardError(f"field {key}: its type can't change; add a new field instead")
 
-                fields[key] = {**fields[key], **{name: change[name] for name in ("label", "stages", "options", "required", "currency", "to") if name in change}}
+                fields[key] = {**fields[key], **{name: change[name] for name in ("label", "stages", "options", "required", "currency", "to", "format", "readonly", "approve", "attachments", "covers") if name in change}}
 
             for key in raw.get("retire_fields") or []:
                 if key not in fields:
@@ -502,7 +538,10 @@ class Store:
             # Buttons are replaced as a whole list when given, and checked against the fields as they are now.
             actions = _clean_actions(raw["actions"], cleaned) if "actions" in raw else _clean_actions(collection["actions"], cleaned)
             feed = _clean_feed(raw["feed"]) if "feed" in raw else collection.get("feed")
-            conn.execute("UPDATE collections SET title = ?, description = ?, fields = ?, actions = ?, feed = ?, updated_at = ? WHERE key = ?", (title, description, _dump(cleaned), _dump(actions), _dump(feed) if feed else None, self._now(), collection["key"]))
+            # A layout is replaced as a whole when given (null for the standard screen); otherwise the stored one loses
+            # only what names a field or button that is gone.
+            layout = _clean_layout(raw["layout"], cleaned, actions) if "layout" in raw else Y.still_valid(collection.get("layout"), cleaned, actions)
+            conn.execute("UPDATE collections SET title = ?, description = ?, fields = ?, actions = ?, feed = ?, layout = ?, updated_at = ? WHERE key = ?", (title, description, _dump(cleaned), _dump(actions), _dump(feed) if feed else None, _dump(layout) if layout else None, self._now(), collection["key"]))
 
             return self._collection(conn.execute("SELECT * FROM collections WHERE key = ?", (collection["key"],)).fetchone())
 
@@ -715,6 +754,13 @@ class Store:
     def update(self, actor: Actor, record_id: str, values, *, override_person: bool = False) -> dict:
         with self._db(write=True) as conn:
             collection, record = self._find_record(conn, actor, record_id, write=True)
+
+            if actor.kind == "person":
+                locked = [field["label"] for field in collection["fields"] if field.get("readonly") and field["key"] in (values or {})]
+
+                if locked:
+                    raise DashboardError(f"{locked[0]} is kept by {collection['owner']}; ask it to change it")
+
             record, changed, kept = self._apply(conn, collection, record, self._clean(collection, values, partial=True), actor, override_person)
 
             return {"record": record, "changed": changed, "kept": kept}
@@ -724,6 +770,9 @@ class Store:
         with self._db(write=True) as conn:
             collection, record = self._find_record(conn, actor, record_id, write=True)
             status = F.status_field(collection["fields"])
+
+            if status and status.get("readonly") and actor.kind == "person":
+                raise DashboardError(f"{status['label']} is kept by {collection['owner']}; it closes the record itself")
 
             if status:
                 stage = record["values"].get(status["key"])
@@ -784,9 +833,13 @@ class Store:
 
             return {"record": {**record, "muted_until": until}}
 
-    def start_action(self, actor: Actor, record_id: str, action_id: str, session: str | None = None) -> dict:
+    def start_action(self, actor: Actor, record_id: str, action_id: str, session: str | None = None, digest: str | None = None) -> dict:
         """The person pressed one of a collection's buttons on a record: it is logged, the record waits on the bot (no
-        amber) until the bot next writes it, and the answer carries the message the app sends the bot in a side chat."""
+        amber) until the bot next writes it, and the answer carries the message the app sends the bot in a side chat.
+
+        A button that sends a draft the person approves (`approve`) needs `digest`, the digest of the draft as the app drew
+        it: when the draft changed since, nothing starts (Changed, with the digest now), so the person looks again; when it
+        matches, the approval is stored for the plugin that sends it to check."""
         if actor.kind != "person":
             raise DashboardError("a button is pressed by the person")
 
@@ -807,12 +860,58 @@ class Store:
             if not _offered(action, record, collection["fields"], now):
                 raise DashboardError(f"{action['label']} isn't offered for this record right now")
 
+            draft = next((field for field in collection["fields"] if field["key"] == action.get("draft")), None)
+            approved = None
+
+            if draft is not None and (draft.get("approve") or digest):
+                current = A.record_digest(collection, record, draft["key"])
+
+                if not digest:
+                    raise Changed(f"{action['label']} needs your approval of exactly this {draft['label'].lower()}; update the app to approve it", current)
+
+                if str(digest).strip().lower() != current:
+                    raise Changed(f"The {draft['label'].lower()} changed since you opened it, so nothing was sent. Review the new version.", current)
+
+                approved = current
+                conn.execute("INSERT INTO approvals (record, draft, action, digest, at) VALUES (?, ?, ?, ?, ?)", (record["id"], draft["key"], action["id"], current, now))
+                self._log(conn, record["id"], actor, "_approved", None, current, now)
+
             job = {"action": action["id"], "label": action["label"], "session": session if SESSION.match(str(session or "")) else None, "at": now}
             conn.execute("UPDATE records SET running = ? WHERE id = ?", (_dump(job), record["id"]))
             self._log(conn, record["id"], actor, "_action", None, action["label"], now)
             record = {**record, "running": job}
 
-            return {"record": record, "running": job, "message": action_message(collection, record, action, self._presentation(conn, collection, record))}
+            return {"record": record, "running": job, **({"approved": approved} if approved else {}), "message": action_message(collection, record, action, self._presentation(conn, collection, record), approved)}
+
+    def report(self, actor: Actor, record_id: str, draft: str, digest: str, outcome: str, detail: str | None = None) -> dict:
+        """What a bot (or its sending tool) did with the person's latest approval of a draft: `sent`, with the digest of
+        what went out, or `refused`, with why. The person sees whether it matched what they approved."""
+        if actor.kind != "bot":
+            raise DashboardError("a send is reported by the bot")
+
+        if outcome not in A.OUTCOMES:
+            raise DashboardError(f"outcome is one of {', '.join(A.OUTCOMES)}")
+
+        with self._db(write=True) as conn:
+            collection, record = self._find_record(conn, actor, record_id, write=True)
+            field = next((item for item in collection["fields"] if item["key"] == str(draft or "").strip().lower() and item["type"] == "draft"), None)
+
+            if field is None:
+                raise DashboardError("draft names one of this collection's draft fields")
+
+            row = conn.execute("SELECT id, digest FROM approvals WHERE record = ? AND draft = ? ORDER BY id DESC LIMIT 1", (record["id"], field["key"])).fetchone()
+
+            if row is None:
+                raise DashboardError(f"your person hasn't approved this {field['label'].lower()}; nothing to report")
+
+            now = self._now()
+            sent = str(digest or "").strip().lower()[:64]
+            text = _text(detail, "detail", 500, single_line=False) or None
+            conn.execute("UPDATE approvals SET outcome = ?, outcome_digest = ?, outcome_at = ?, detail = ? WHERE id = ?", (outcome, sent, now, text, row["id"]))
+            self._log(conn, record["id"], actor, "_sent" if outcome == "sent" else "_refused", None, text, now)
+            conn.execute("UPDATE records SET running = NULL, updated_at = ? WHERE id = ?", (now, record["id"]))
+
+            return {"record": record["id"], "draft": field["key"], "outcome": outcome, "matched": sent == row["digest"], "at": now}
 
     def pending(self, actor: Actor, ref, where=None, retry_after: int = 6 * 3600) -> list[str]:
         """What is waiting for the bot in a collection, as stable lines for a Hermes `monitor_script`: open records that
@@ -856,7 +955,27 @@ class Store:
         with self._db() as conn:
             collection, record = self._find_record(conn, actor, record_id, write=False)
 
-            return {"record": record, "collection": collection, "history": self.history(conn, record["id"]), "show": self._presentation(conn, collection, record)}
+            return {"record": record, "collection": collection, "history": self.history(conn, record["id"]), "show": self._presentation(conn, collection, record), "approvals": self._approvals(conn, collection, record)}
+
+    @staticmethod
+    def _approvals(conn, collection: dict, record: dict) -> dict:
+        """For each draft the person approves: the digest of it as stored now, and their latest approval (with what the
+        sender reported). The app checks the digest against what it drew before it lets the person approve."""
+        found = {}
+
+        for field in collection["fields"]:
+            if field["type"] != "draft" or field.get("retired") or not field.get("approve"):
+                continue
+
+            row = conn.execute("SELECT * FROM approvals WHERE record = ? AND draft = ? ORDER BY id DESC LIMIT 1", (record["id"], field["key"])).fetchone()
+            entry = {"digest": A.record_digest(collection, record, field["key"]), "covers": A.covered(field)}
+
+            if row is not None:
+                entry["approved"] = A._row(row)
+
+            found[field["key"]] = entry
+
+        return found
 
     def _presentation(self, conn, collection: dict, record: dict) -> dict:
         """How the app heads a record: the title, subtitle and meta of the first view that shows its collection (its owner's
@@ -879,8 +998,13 @@ class Store:
         now = self._now()
         job = Q.running(record, now)
         offered = [] if record.get("closed_at") or job else [{"id": action["id"], "label": action["label"]} for action in collection.get("actions", []) if _offered(action, record, fields, now)]
+        # A layout's question rises while its `when` matches (by default, while the record needs the person); the app draws
+        # what this says rather than reading filters itself.
+        ask = next((block for block in (collection.get("layout") or {}).get("blocks", []) if block["block"] == "ask"), None)
+        asking = bool(ask) and not record.get("closed_at") and not job and (Q.matches(ask["when"], record, fields, now) if ask.get("when") else flagged is not None)
 
         return {
+            "ask": asking,
             "title": show.get("title"),
             "subtitle": show.get("subtitle"),
             "meta": show.get("meta"),
@@ -984,7 +1108,8 @@ class Store:
         with self._db(write=True) as conn:
             collection = None
 
-            if live is None and kind not in ("summary", "stat"):
+            if live is None and (kind not in ("summary", "stat") or (kind == "stat" and raw.get("collection"))):
+                # A stat names a collection only when its metrics open the records they stand for.
                 collection = self._find_collection(conn, actor, raw.get("collection"))
 
             try:
@@ -1044,17 +1169,41 @@ class Store:
     # -- kanban cards mirrored into records (kanban.py) -----------------------------------------------------------
 
     def mirrored_cards(self) -> dict:
-        """`(board, task)` → `{profile, record, status, seen}` for every kanban card mirrored so far."""
+        """`(board, task)` → `{profile, record, status, seen, comments_seen}` for every kanban card mirrored so far."""
         with self._db() as conn:
-            return {(row["board"], row["task"]): {"profile": row["profile"], "record": row["record"], "status": row["status"], "seen": row["seen"]} for row in conn.execute("SELECT * FROM kanban_cards")}
+            return {(row["board"], row["task"]): {"profile": row["profile"], "record": row["record"], "status": row["status"], "seen": row["seen"], "comments_seen": row["comments_seen"]} for row in conn.execute("SELECT * FROM kanban_cards")}
 
-    def remember_card(self, board: str, task: str, profile: str, record: str, status: str, seen: str) -> None:
+    def remember_card(self, board: str, task: str, profile: str, record: str, status: str, seen: str, comments_seen: int | None = None) -> None:
         with self._db(write=True) as conn:
             conn.execute(
-                "INSERT INTO kanban_cards (board, task, profile, record, status, seen) VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (board, task) DO UPDATE SET profile = excluded.profile, record = excluded.record, status = excluded.status, seen = excluded.seen",
-                (board, task, profile, record, status, seen),
+                "INSERT INTO kanban_cards (board, task, profile, record, status, seen, comments_seen) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (board, task) DO UPDATE SET profile = excluded.profile, record = excluded.record, status = excluded.status, seen = excluded.seen, "
+                "comments_seen = MAX(kanban_cards.comments_seen, excluded.comments_seen)",
+                (board, task, profile, record, status, seen, int(comments_seen or 0)),
             )
+
+    def card_notes(self, record_id: str, comments: list[dict], skip_author: str) -> int:
+        """A card's comments as notes on its record, signed by who wrote them (a bot, or "you" for the person's own from
+        elsewhere). The person's answers from the app are already notes, so `skip_author`'s are left out. Returns the
+        highest comment id seen."""
+        highest = 0
+
+        with self._db(write=True) as conn:
+            for comment in comments:
+                highest = max(highest, int(comment.get("id") or 0))
+                author = str(comment.get("author") or "")
+
+                if author == skip_author or not str(comment.get("body") or "").strip():
+                    continue
+
+                person = author.split(" ")[0] == "user"
+                note = _text(comment["body"], "note", MAX_NOTE, single_line=False)[:MAX_NOTE]
+                conn.execute(
+                    "INSERT INTO changes (record, at, by_kind, by_name, field, old, new) VALUES (?, ?, ?, ?, '_note', NULL, ?)",
+                    (record_id, int(comment.get("at") or self._now()), "person" if person else "bot", "you" if person else (author[:64] or "a worker"), _dump(note)),
+                )
+
+        return highest
 
     def card_of(self, record_id: str) -> dict | None:
         """The kanban card a record mirrors, or None."""
@@ -1179,6 +1328,43 @@ class Store:
             bots[profile] = {"needs_you": len(flagged), "views": len(board["views"]), "updated": updated}
 
         return bots
+
+    def page(self, profile: str, view_id: str, *, bucket: str | None = None, metric: int | None = None, offset: int = 0) -> dict:
+        """The page a number, chart or stat on a bot's dashboard opens: the records behind it (`query.page`), with the
+        fields of their collection so the app can draw them. Live panels list their source's rows, which open nothing."""
+        profile = Actor.bot(profile).name
+        now = self._now()
+
+        with self._db() as conn:
+            row = conn.execute("SELECT * FROM views WHERE key = ?", (f"{profile}/{_slug(view_id, 'view id')}",)).fetchone()
+
+            if row is None:
+                raise NotFound(f"no panel {view_id!r} on {profile}'s dashboard")
+
+            view = self._view(row)
+            source = view["config"].get("source")
+
+            if source:
+                entry = L.cached(f"{profile}/{view['id']}", source, L.bot_home(self.root, profile), now)
+                fields = view["config"].get("source_fields") or []
+                records = L.as_records(entry["rows"], fields, now)
+                collection = None
+            else:
+                found = conn.execute("SELECT * FROM collections WHERE key = ? AND retired_at IS NULL", (view["collection"],)).fetchone() if view["collection"] else None
+
+                if found is None:
+                    raise NotFound("this panel's collection is gone")
+
+                collection = self._collection(found)
+                fields = collection["fields"]
+                records = self._records(conn, collection["key"])
+
+        try:
+            result = Q.page(view, fields, records, now, bucket=bucket, metric=metric, offset=offset)
+        except (Q.QueryError, F.FieldError) as error:
+            raise DashboardError(str(error)) from None
+
+        return {**result, "fields": fields, "live": bool(source), "now": now, **({"collection_title": collection["title"]} if collection else {})}
 
     def needs_you_records(self, profile: str) -> list[dict]:
         """The open records on a bot's dashboard that need the person, once each, with the view that flags them."""

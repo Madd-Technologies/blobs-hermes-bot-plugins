@@ -79,6 +79,25 @@ K.answer(store, by_card[planned]["id"], "Mondays first.", board, served)
 assert kb.get_task(conn, planned).status == "triage", "a planner's triage card is not the person's to release"
 print("looped: the answer released it to", result["status"], "; a planner's triage card got the note and stayed in triage")
 
+# 0.6: a task another bot asked for, worked by a real run, blocked with choices, then answered.
+reviews = kb.create_task(conn, title="Collect the June reviews", body="Collect June's reviews into one sheet.", assignee=BOT, created_by="zz-asker")
+assert kb.claim_task(conn, reviews, claimer="zz-worker")
+kb.add_comment(conn, reviews, BOT, "Found 214 reviews.")
+assert kb.block_task(conn, reviews, reason="Which reviews count?\nOptions: Airbnb only | Both")
+K.mirror(store, board, served)
+task = next(record for record in store.query(S.Actor.bot(BOT), K.COLLECTION, {"limit": 50})["records"] if record["values"]["card"] == reviews)
+values = task["values"]
+assert (values["why"], values["choices"], values["asked_by"], values["task"]) == ("Which reviews count?", ["Airbnb only", "Both"], "zz-asker", "Collect June's reviews into one sheet."), values
+assert values["attempts"][0]["label"] == "Run 1 · stopped to ask you" and values.get("latest") is None, values
+served_record = store.get_record(S.Actor.person(), task["id"])
+assert served_record["show"]["ask"] and [(entry["by"], entry["new"]) for entry in served_record["history"] if entry["field"] == "_note"] == [(BOT, "Found 214 reviews.")]
+print("task: question, choices, who asked, the task, its attempt and the worker's comment as a note:", values["attempts"][0]["label"])
+
+assert K.answer(store, task["id"], "Airbnb only", board, served)["posted"]
+answered = store.get_record(S.Actor.person(), task["id"])
+assert not answered["show"]["ask"] and answered["record"]["values"].get("latest") is None, answered["record"]["values"]
+print("task answered: the question is down, and the old question never shows as what it has done")
+
 assert K.mirror(store, board, served) == 0
 print("unchanged: a second pass writes nothing")
 conn.close()

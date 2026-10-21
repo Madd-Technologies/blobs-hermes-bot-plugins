@@ -112,6 +112,9 @@ def clean_filter(raw, fields: list[dict], depth: int = 0, count: list | None = N
     if op in NO_VALUE:
         return condition
 
+    if kind in F.STRUCTURED:
+        raise QueryError(f"{key} is a {kind}: a filter can only ask whether it is empty or not_empty")
+
     value = raw.get("value")
 
     if op in DAYS_OPS:
@@ -275,7 +278,10 @@ def clean_sort(raw, fields: list[dict]) -> list[dict]:
             raise QueryError("sort is a list of {field, dir}")
 
         key = str(item.get("field") or "")
-        _field_type(key, by_key)
+
+        if _field_type(key, by_key) in F.STRUCTURED:
+            raise QueryError(f"{key} is a list; sort by another field")
+
         direction = str(item.get("dir") or "asc").lower()
 
         if direction not in ("asc", "desc"):
@@ -421,7 +427,69 @@ def _key(raw, fields: list[dict], what: str, types: tuple | None = None) -> str:
     if types and kind not in types:
         raise QueryError(f"{what} needs a {' or '.join(types)} field, not {key} ({kind})")
 
+    if not types and kind in F.STRUCTURED:
+        raise QueryError(f"{what} can't show {key} ({kind}): a row shows one value; show its items on the record instead")
+
     return key
+
+
+#: The panels that can open a page of the records behind them (a list, board or table opens its full view instead).
+OPENS_FROM = ("number", "chart", "stat")
+PAGE_KINDS = ("list", "table", "board")
+PAGE_SIZE = 50
+
+
+def default_title(fields: list[dict]) -> str | None:
+    """The field that names a record when nothing says: the first required text field, else the first text field."""
+    text = [field for field in fields if field["type"] == "text" and not field.get("retired")]
+
+    return next((field["key"] for field in text if field.get("required")), text[0]["key"] if text else None)
+
+
+def clean_opens(raw, fields: list[dict]) -> dict | None:
+    """The page a number, chart or stat opens: `true`, or `{kind: list|table|board, title?, show?, sort?, columns?,
+    group_by?, signals?}`. A page holds only records, so it can't open a page of its own: dashboard, page, record."""
+    if raw in (None, False, {}, ""):
+        return None
+
+    raw = {} if raw is True else raw
+
+    if not isinstance(raw, dict):
+        raise QueryError("opens is true or {kind: list|table|board, title?, show?, sort?, columns?, group_by?}")
+
+    if "opens" in raw:
+        raise QueryError("a page can't open another page: it is dashboard, page, record")
+
+    kind = str(raw.get("kind") or "list").strip().lower()
+
+    if kind not in PAGE_KINDS:
+        raise QueryError(f"a page is one of {', '.join(PAGE_KINDS)}")
+
+    inner = {key: raw[key] for key in ("show", "sort", "columns", "signals") if key in raw}
+
+    if kind in ("list", "board") and not (inner.get("show") or {}).get("title"):
+        title = default_title(fields)
+
+        if not title:
+            raise QueryError("opens: show needs a title field (this collection has no text field to name a record by)")
+
+        inner["show"] = {**(inner.get("show") or {}), "title": title}
+
+    if kind == "board":
+        inner["group_by"] = raw.get("group_by")
+
+    page = {"kind": kind, **clean_view_config(kind, inner, fields)}
+
+    for drop in ("filter", "needs_you", "limit", "include_closed", "closed_within_days"):
+        page.pop(drop, None)
+
+    if kind != "board" and raw.get("group_by"):
+        page["group_by"] = _key(raw["group_by"], fields, "opens.group_by", ("date", "datetime", "status", "choice"))
+
+    if raw.get("title"):
+        page["title"] = F.clean_value({"key": "opens.title", "type": "text"}, raw["title"])[:40]
+
+    return page
 
 
 def clean_view_config(kind: str, raw, fields: list[dict] | None) -> dict:
@@ -457,9 +525,22 @@ def clean_view_config(kind: str, raw, fields: list[dict] | None) -> dict:
             if change:
                 entry["change"] = change[:16]
 
+            if metric.get("opens"):
+                # A metric opens the records it stands for, named by a filter on the view's collection.
+                if fields is None:
+                    raise QueryError("a stat metric opens records of a collection: give the view a collection")
+
+                spec = metric["opens"] if isinstance(metric["opens"], dict) else {}
+                entry["opens"] = {"filter": clean_filter(spec.get("filter"), fields), "include_closed": bool(spec.get("include_closed"))}
+
             cleaned.append(entry)
 
-        return {"metrics": cleaned}
+        config = {"metrics": cleaned}
+
+        if any("opens" in metric for metric in cleaned):
+            config["opens"] = clean_opens(raw.get("opens") or True, fields)
+
+        return config
 
     if fields is None:
         raise QueryError(f"a {kind} view needs a collection")
@@ -525,6 +606,9 @@ def clean_view_config(kind: str, raw, fields: list[dict] | None) -> dict:
             raise QueryError(f"bucket must be one of {', '.join(BUCKETS)}")
 
         config.update({"field": key, "bucket": bucket, "count": max(2, min(int(raw.get("count") or 8), MAX_BUCKETS)), "style": "line" if raw.get("style") == "line" else "bar"})
+
+    if kind in ("number", "chart"):
+        config["opens"] = clean_opens(raw.get("opens"), fields)
 
     return {key: value for key, value in config.items() if value is not None}
 
@@ -662,7 +746,9 @@ def compute_view(view: dict, fields: list[dict] | None, records: list[dict], now
         return {**result, "text": config.get("text", "")}
 
     if kind == "stat":
-        return {**result, "metrics": config.get("metrics", [])}
+        metrics = [{key: value for key, value in metric.items() if key != "opens"} | ({"opens": True} if metric.get("opens") else {}) for metric in config.get("metrics", [])]
+
+        return {**result, "metrics": metrics}
 
     fields = fields or []
     chosen = [record for record in records if matches(config.get("filter"), record, fields, now)]
@@ -672,6 +758,9 @@ def compute_view(view: dict, fields: list[dict] | None, records: list[dict], now
 
     if kind in ("number", "chart") and (unit := _unit(config, fields)):
         result["unit"] = unit
+
+    if kind in ("number", "chart") and config.get("opens"):
+        result["opens"] = True
 
     if kind in ("list", "checklist", "table"):
         shown = chosen if config.get("include_closed") else open_
@@ -732,3 +821,86 @@ def compute_view(view: dict, fields: list[dict] | None, records: list[dict], now
     points = series(chosen, {"field": config["field"], "bucket": config["bucket"], "count": config["count"], "aggregate": config["aggregate"]}, fields, now)
 
     return {**result, "bucket": config["bucket"], "style": config.get("style", "bar"), "points": points}
+
+
+# -- pages: the records behind a number, a chart's bar or a stat -------------------------------------------------------
+
+
+def page(view: dict, fields: list[dict], records: list[dict], now: float, *, bucket: str | None = None, metric: int | None = None, offset: int = 0) -> dict:
+    """The page a panel opens: the records it counts, sorted (grouped when the page says), PAGE_SIZE at a time. A number
+    counts its open records, or every record of its current period; a chart's bar the records in that bucket; a stat's
+    metric the records its filter names. Rows open records; nothing on a page opens another page."""
+    kind, config = view["kind"], view.get("config") or {}
+    opens = config.get("opens")
+
+    if kind not in OPENS_FROM or not opens:
+        raise QueryError("this panel doesn't open a page")
+
+    chosen = [record for record in records if matches(config.get("filter"), record, fields, now)]
+    caption: dict = {}
+
+    if kind == "number":
+        period = config.get("period")
+
+        if period:
+            field_kind = _field_type(period["field"], {field["key"]: field for field in fields})
+            current = bucket_start(_today(now), period["unit"])
+            chosen = [record for record in chosen if (day := _as_date(value_of(record, period["field"]), field_kind)) is not None and bucket_start(day, period["unit"]) == current]
+            caption = {"period": period["unit"], "start": current.isoformat(), "end": (_shift(current, period["unit"], 1) - timedelta(days=1)).isoformat()}
+        else:
+            chosen = [record for record in chosen if not record.get("closed_at")]
+    elif kind == "chart":
+        try:
+            start = date.fromisoformat(str(bucket or ""))
+        except ValueError:
+            raise QueryError("name the bar: bucket=<its start date, YYYY-MM-DD>") from None
+
+        start = bucket_start(start, config["bucket"])
+        field_kind = _field_type(config["field"], {field["key"]: field for field in fields})
+        chosen = [record for record in chosen if (day := _as_date(value_of(record, config["field"]), field_kind)) is not None and bucket_start(day, config["bucket"]) == start]
+        caption = {"period": config["bucket"], "start": start.isoformat(), "end": (_shift(start, config["bucket"], 1) - timedelta(days=1)).isoformat()}
+    else:
+        metrics = config.get("metrics") or []
+
+        if metric is None or not 0 <= metric < len(metrics) or not metrics[metric].get("opens"):
+            raise QueryError("name the metric: metric=<its position, from 0>, one that opens records")
+
+        spec = metrics[metric]["opens"]
+        chosen = [record for record in chosen if matches(spec.get("filter"), record, fields, now) and (spec.get("include_closed") or not record.get("closed_at"))]
+        caption = {"metric": metrics[metric]["label"]}
+
+    order = list(opens.get("sort") or [{"field": "_updated", "dir": "desc"}])
+    group = opens.get("group_by")
+
+    if group and opens["kind"] != "board":
+        # Groups follow each other in their own order: days from the earliest, stages in their order.
+        order = [{"field": group, "dir": "asc"}] + [item for item in order if item["field"] != group]
+
+    ordered = _muted_last(sort_records(chosen, order, fields), now)
+    result: dict = {"id": view["id"], "title": opens.get("title") or view["title"], "kind": opens["kind"], "panel": kind, "collection": view.get("collection"), "count": len(ordered), **caption}
+    row_config = {**opens, "needs_you": config.get("needs_you")}
+    by_key = {field["key"]: field for field in fields}
+
+    if opens["kind"] == "board":
+        group_field = by_key[opens["group_by"]]
+        names = [stage["name"] for stage in group_field["stages"]] if group_field["type"] == "status" else list(group_field["options"])
+        result["group_by"] = opens["group_by"]
+        result["columns"] = [{"name": name, "count": sum(1 for record in ordered if value_of(record, group_field["key"]) == name), "rows": [_row(record, row_config, fields, now) for record in ordered if value_of(record, group_field["key"]) == name][:PAGE_SIZE]} for name in names]
+
+        return result
+
+    offset = max(0, int(offset or 0))
+    shown = ordered[offset:offset + PAGE_SIZE]
+    result["next"] = offset + PAGE_SIZE if offset + PAGE_SIZE < len(ordered) else None
+
+    if group:
+        result["group_by"] = group
+
+    if opens["kind"] == "table":
+        columns = opens.get("columns", [])
+        result["columns"] = [{"key": key, "label": by_key[key]["label"] if key in by_key else key.strip("_").capitalize(), "type": "datetime" if key in SPECIAL else by_key[key]["type"]} for key in columns]
+        result["rows"] = [{"id": record["id"], "done": bool(record.get("closed_at")), "needs_you": needs_you(record, row_config, fields, now), **({"group": value_of(record, group)} if group else {}), "cells": [_typed(by_key, key, record) for key in columns]} for record in shown]
+    else:
+        result["rows"] = [{**_row(record, row_config, fields, now), **({"group": value_of(record, group)} if group else {})} for record in shown]
+
+    return result

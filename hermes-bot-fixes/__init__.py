@@ -11,6 +11,8 @@
   (`dmreply.py`).
 - A teammate's message runs in the recipient's inbox chat ("Bot Inbox"), never in its main chat (`inbox.py`, which hands
   the turn to `inbox_turn.py`; `HERMES_BOT_FIXES_BOT_INBOX=off` switches it off).
+- The dashboard runs every group room and the messaging gateway none, so a room member's approvals and questions reach the
+  app (`rooms.py`; `HERMES_BOT_FIXES_GATEWAY_ROOMS=on` switches it off).
 
 The fixes apply to the whole process, so the default profile's copy covers every bot that the dashboard and the messaging
 gateway run. A turn outside them, in a one-shot `hermes -p <bot> chat`, loads only that bot's own plugins, so each bot
@@ -27,13 +29,14 @@ log = logging.getLogger("hermes-bot-fixes")
 
 
 def register(ctx) -> None:
-    from . import capture, compaction, dbguard, dmreply, handoff, inbox
+    from . import capture, compaction, dbguard, dmreply, handoff, inbox, rooms
 
     applied = capture.apply()
     restatement = compaction.apply()
     handing_off = handoff.apply()
     reply_once = dmreply.apply()
     inboxed = inbox.apply()
+    gateway_rooms = rooms.apply()
 
     def on_tool(**kw):
         # computer_use may only be importable once a turn first uses it; apply what is still missing then.
@@ -45,4 +48,4 @@ def register(ctx) -> None:
 
     ctx.register_hook("pre_tool_call", on_tool)
     started = dbguard.start()
-    log.info("hermes-bot-fixes: panels %s, settle %s, compaction %s, hand-off %s, reply once %s, bot inbox %s, database guard %s", applied["panels"], applied["settle"], restatement, handing_off, reply_once, ("on" if inbox.enabled() else "off") if inboxed else False, "started" if started else "already running")
+    log.info("hermes-bot-fixes: panels %s, settle %s, compaction %s, hand-off %s, reply once %s, bot inbox %s, gateway out of rooms %s, database guard %s", applied["panels"], applied["settle"], restatement, handing_off, reply_once, ("on" if inbox.enabled() else "off") if inboxed else False, gateway_rooms, "started" if started else "already running")

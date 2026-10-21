@@ -27,7 +27,21 @@ TYPES = (
     "link",
     "rating",
     "draft",
+    "list",
+    "entries",
+    "files",
 )
+
+#: Types whose value is a list of items, not one value: filters only ask whether they are empty, and they are not sorted
+#: on or shown in a row slot or a table column.
+STRUCTURED = ("list", "entries", "files")
+
+#: How a longtext or draft field's text is written: plain words, Markdown, or HTML (an email, say). The app draws HTML in a
+#: sealed view (no scripts, nothing loaded from the network).
+FORMATS = ("plain", "markdown", "html")
+TONES = ("good", "warn", "bad")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MAX_ITEMS = {"list": 30, "entries": 50, "files": 20}
 
 MAX_FIELDS = 60
 MAX_OPTIONS = 30
@@ -37,7 +51,7 @@ PHONE = re.compile(r"^\+?[\d\s().-]{3,30}$")
 EMAIL = re.compile(r"^[^\s@<>]{1,64}@[^\s@<>]{1,190}\.[A-Za-z]{2,24}$")
 LINK = re.compile(r"^(/[^\s<>]*|file:///[^\s<>]*|https://[^\s<>]+)$")
 CURRENCY = re.compile(r"^[A-Z]{3}$")
-LIMITS = {"text": 300, "longtext": 8000, "draft": 8000, "url": 1000, "link": 1000, "label": 40, "option": 40}
+LIMITS = {"text": 300, "longtext": 8000, "draft": 8000, "html": 200_000, "url": 1000, "link": 1000, "label": 40, "option": 40, "item": 80, "entry": 120, "detail": 200, "name": 120, "mime": 80}
 
 
 class FieldError(ValueError):
@@ -63,7 +77,10 @@ def _label(value, what: str) -> str:
 
 def clean_field(raw) -> dict:
     """One field definition, checked: `{key, label, type}` plus `stages` (status), `options` (choice), `currency` (money),
-    `to` (draft: the key of the field naming who the draft is for)."""
+    `to` (draft: the key of the field naming who the draft is for), `format` (longtext and draft: plain, markdown or
+    html), `readonly` (the person can't change it in the app: the bot or its script keeps it), and for a draft `approve`
+    (its button is the person's approval of exactly this content, bound to a digest), `attachments` (a files field sent
+    with it) and `covers` (other fields that are part of what is approved, like the subject)."""
     if not isinstance(raw, dict):
         raise FieldError("each field must be an object with key, label and type")
 
@@ -84,6 +101,17 @@ def clean_field(raw) -> dict:
 
     if raw.get("retired"):
         field["retired"] = True
+
+    if raw.get("readonly"):
+        field["readonly"] = True
+
+    if kind in ("longtext", "draft") and raw.get("format") not in (None, "", "plain"):
+        fmt = str(raw["format"]).strip().lower()
+
+        if fmt not in FORMATS:
+            raise FieldError(f"field {key}: format is one of {', '.join(FORMATS)}")
+
+        field["format"] = fmt
 
     if kind == "status":
         stages = raw.get("stages")
@@ -138,6 +166,20 @@ def clean_field(raw) -> dict:
     if kind == "draft" and raw.get("to"):
         field["to"] = str(raw["to"]).strip().lower()
 
+    if kind == "draft" and raw.get("approve"):
+        field["approve"] = True
+
+    if kind == "draft" and raw.get("attachments"):
+        field["attachments"] = str(raw["attachments"]).strip().lower()
+
+    if kind == "draft" and raw.get("covers"):
+        covers = raw["covers"]
+
+        if not isinstance(covers, list) or len(covers) > 12:
+            raise FieldError(f"field {key}: covers is a list of up to 12 field keys")
+
+        field["covers"] = [str(item).strip().lower() for item in covers]
+
     return field
 
 
@@ -157,9 +199,18 @@ def clean_fields(raw) -> list[dict]:
     if sum(1 for field in fields if field["type"] == "status") > 1:
         raise FieldError("a collection has at most one status field (it is what opens and closes a record)")
 
+    by_key = {field["key"]: field for field in fields}
+
     for field in fields:
         if field.get("to") and (field["to"] == field["key"] or field["to"] not in keys):
             raise FieldError(f"field {field['key']}: to names another field of this collection (who the draft is for)")
+
+        if field.get("attachments") and (by_key.get(field["attachments"]) or {}).get("type") != "files":
+            raise FieldError(f"field {field['key']}: attachments names a files field of this collection")
+
+        for other in field.get("covers") or []:
+            if other == field["key"] or other not in by_key or by_key[other]["type"] in ("draft",):
+                raise FieldError(f"field {field['key']}: covers names other fields of this collection (not drafts), like the subject")
 
     return fields
 
@@ -254,9 +305,22 @@ def clean_value(field: dict, value):
 
     kind = field["type"]
 
+    if kind in STRUCTURED:
+        return _clean_items(field, value)
+
     if kind in ("text", "longtext", "draft"):
         if not isinstance(value, (str, int, float)) or isinstance(value, bool):
             raise FieldError(f"{key}: expected text")
+
+        if field.get("format") == "html":
+            # Stored exactly as given (less control characters), never clipped: cutting HTML breaks it, and an approval
+            # covers the exact text.
+            text = CONTROL.sub("", str(value))
+
+            if len(text) > LIMITS["html"]:
+                raise FieldError(f"{key}: HTML is limited to {LIMITS['html']} characters")
+
+            return text
 
         return _clip(str(value), LIMITS[kind], single_line=kind == "text")
 
@@ -324,6 +388,100 @@ def clean_value(field: dict, value):
         return text
 
     raise FieldError(f"{key}: unknown type {kind}")  # pragma: no cover
+
+
+def _clean_items(field: dict, value) -> list:
+    """A list, entries or files value: a list of small items, each checked."""
+    key, kind = field["key"], field["type"]
+
+    if isinstance(value, str) and kind == "list":
+        value = [part for part in re.split(r"\s*[|\n]\s*", value) if part.strip()]
+
+    if not isinstance(value, list):
+        raise FieldError(f"{key}: expected a list")
+
+    if len(value) > MAX_ITEMS[kind]:
+        raise FieldError(f"{key}: at most {MAX_ITEMS[kind]} items")
+
+    items = []
+
+    for item in value:
+        if kind == "list":
+            if not isinstance(item, (str, int, float)) or isinstance(item, bool) or not str(item).strip():
+                raise FieldError(f"{key}: each item is a short text")
+
+            items.append(_clip(str(item), LIMITS["item"]))
+            continue
+
+        if not isinstance(item, dict):
+            raise FieldError(f"{key}: each item is an object" + (" {label, detail?, at?, tone?}" if kind == "entries" else " {name, path or url, mime?, size?, sha256?}"))
+
+        if kind == "entries":
+            label = item.get("label")
+
+            if not isinstance(label, (str, int, float)) or not str(label).strip():
+                raise FieldError(f"{key}: each entry needs a label")
+
+            entry: dict = {"label": _clip(str(label), LIMITS["entry"])}
+
+            if item.get("detail") not in (None, ""):
+                entry["detail"] = _clip(str(item["detail"]), LIMITS["detail"])
+
+            if item.get("at") not in (None, ""):
+                entry["at"] = parse_when(item["at"], f"{key}.at")
+
+            if item.get("tone") not in (None, ""):
+                if item["tone"] not in TONES:
+                    raise FieldError(f"{key}: an entry's tone is good, warn or bad")
+
+                entry["tone"] = item["tone"]
+
+            items.append(entry)
+            continue
+
+        name = item.get("name")
+
+        if not isinstance(name, str) or not name.strip():
+            raise FieldError(f"{key}: each file needs a name")
+
+        entry = {"name": _clip(name, LIMITS["name"])}
+        path, url = str(item.get("path") or "").strip(), str(item.get("url") or "").strip()
+
+        if path:
+            if not LINK.match(path) or len(path) > LIMITS["link"] or path.startswith("https://"):
+                raise FieldError(f"{key}: a file's path is on this server (/home/…, /api/plugins/…)")
+
+            entry["path"] = path
+        elif url:
+            if not url.startswith("https://") or len(url) > LIMITS["url"] or re.search(r"[\s<>]", url):
+                raise FieldError(f"{key}: a file's url is an https:// address")
+
+            entry["url"] = url
+        else:
+            raise FieldError(f"{key}: each file needs a path on this server or an https:// url")
+
+        if item.get("mime"):
+            entry["mime"] = _clip(str(item["mime"]), LIMITS["mime"])
+
+        if item.get("size") not in (None, ""):
+            size = _number(item["size"], f"{key}.size")
+
+            if not isinstance(size, int) or size < 0:
+                raise FieldError(f"{key}: a file's size is a whole number of bytes")
+
+            entry["size"] = size
+
+        if item.get("sha256"):
+            digest = str(item["sha256"]).strip().lower()
+
+            if not SHA256.match(digest):
+                raise FieldError(f"{key}: a file's sha256 is 64 hex characters")
+
+            entry["sha256"] = digest
+
+        items.append(entry)
+
+    return items or None
 
 
 def clean_values(fields: list[dict], raw, *, partial: bool) -> dict:
