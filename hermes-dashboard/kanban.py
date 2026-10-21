@@ -147,7 +147,7 @@ class HermesBoard:
     def _card(self, conn, board: str, task) -> dict:
         comments = self.kb.list_comments(conn, task.id)
         last = comments[-1] if comments else None
-        reason, blocked_at = None, 0
+        reason, blocked_at, asked = None, 0, None
 
         try:
             runs = self.kb.list_runs(conn, task.id)[-RUNS_SHOWN:]
@@ -163,6 +163,7 @@ class HermesBoard:
             # Blocked twice for the same reason, Hermes sends a card to triage for a person: it needs them as much.
             if status == "blocked" or looped:
                 reason = (event.payload or {}).get("reason") if event else None
+                asked = reason
                 reason = reason or task.last_failure_error or "It needs your input."
                 reason = f"Blocked again for the same reason: {reason}" if looped else reason
                 blocked_at = event.created_at if event else 0
@@ -173,12 +174,18 @@ class HermesBoard:
         with contextlib.suppress(Exception):
             summary = self.kb.latest_summary(conn, task.id)
 
-        if task.status == "done":
-            latest = summary or task.result
-        else:
-            # What the worker last handed over, else the last word a bot left on the card (not the person's own).
-            said = next((comment for comment in reversed(comments) if not comment.author.startswith("user")), None)
-            latest = summary or (said.body if said else None)
+        if summary and not asked:
+            # The question a card blocked on earlier, even after it was answered.
+            with contextlib.suppress(Exception):
+                event = next((event for event in reversed(self.kb.list_events(conn, task.id)) if event.kind in ("blocked", "block_loop_detected")), None)
+                asked = (event.payload or {}).get("reason") if event else None
+
+        if summary and asked and summary.strip() == str(asked).strip():
+            # A run that blocked hands over its question as its summary: that is the ask, not what it has done.
+            summary = None
+
+        # What the worker handed over (a done card's result too). Comments are the record's notes, so they aren't repeated here.
+        latest = summary or (task.result if task.status == "done" else None)
 
         updated = max(task.created_at or 0, task.started_at or 0, task.completed_at or 0, last.created_at if last else 0, blocked_at)
 

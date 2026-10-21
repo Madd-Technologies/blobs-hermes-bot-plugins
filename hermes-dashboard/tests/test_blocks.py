@@ -339,6 +339,17 @@ class KanbanMirror(unittest.TestCase):
     def notes(self, record_id):
         return [(entry["by"], entry["new"]) for entry in self.store.get_record(YOU, record_id)["history"] if entry["field"] == "_note"]
 
+    def test_the_question_rises_only_while_the_card_is_blocked(self):
+        self.board.add("t_9", assignee="juniper", status="blocked", reason="Which?\nOptions: A | B")
+        self.mirror()
+        (record,) = self.store.query(S.Actor.bot("juniper"), K.COLLECTION, {})["records"]
+        served = self.store.get_record(YOU, record["id"])
+        self.assertTrue(served["show"]["ask"])
+        self.assertEqual(served["record"]["values"]["choices"], ["A", "B"])
+        self.board.cards[("default", "t_9")].update(status="running", reason=None)
+        self.mirror()
+        self.assertFalse(self.store.get_record(YOU, record["id"])["show"]["ask"])
+
     def test_comments_become_notes_once_and_the_persons_own_are_not_doubled(self):
         card = self.board.add("t_1", assignee="juniper", status="blocked", reason="Which?", comments=[{"id": 1, "author": "juniper", "body": "Found 214 reviews.", "at": NOW - 60}])
         self.mirror()

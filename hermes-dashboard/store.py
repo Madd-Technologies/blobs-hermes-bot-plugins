@@ -998,8 +998,13 @@ class Store:
         now = self._now()
         job = Q.running(record, now)
         offered = [] if record.get("closed_at") or job else [{"id": action["id"], "label": action["label"]} for action in collection.get("actions", []) if _offered(action, record, fields, now)]
+        # A layout's question rises while its `when` matches (by default, while the record needs the person); the app draws
+        # what this says rather than reading filters itself.
+        ask = next((block for block in (collection.get("layout") or {}).get("blocks", []) if block["block"] == "ask"), None)
+        asking = bool(ask) and not record.get("closed_at") and not job and (Q.matches(ask["when"], record, fields, now) if ask.get("when") else flagged is not None)
 
         return {
+            "ask": asking,
             "title": show.get("title"),
             "subtitle": show.get("subtitle"),
             "meta": show.get("meta"),
