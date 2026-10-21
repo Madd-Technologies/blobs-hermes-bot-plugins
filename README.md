@@ -12,6 +12,7 @@ a Grok-Bot-style client for Hermes "Bot Mode". Each folder is one standalone Her
 | [`hermes-bot-fixes`](hermes-bot-fixes) | Local fixes for Hermes 0.21.x on a Bot Screen host: screenshots skip the desktop panel and wait for the screen to settle, a guard repairs SQLite files whose header a stray TLS record overwrote (checked on a copy first), compaction stops handing a bot back a request it already answered, unfinished background work goes to a new background worker instead of the chat, a bot answers another bot's message once, in its reply, and another bot's message runs in the recipient's inbox chat ("Bot Inbox") instead of its main chat. | Nothing. Install it for the default profile and for each bot; bots need the kanban toolset for the card route. |
 | [`hermes-voice`](hermes-voice) | Optional. Grok voice calls with your bots from the app: the phone talks to xAI directly with a one-time secret this server makes from its Grok sign-in or a bot's own xAI key, and the Grok voice hands real work to the bot through its normal chat. Keeps each bot's call settings (on or off, voice, which account pays). | Hermes 0.21.6+, and the server's xAI Grok sign-in or a bot's `XAI_API_KEY`. Install it once, in the default profile. |
 | [`hermes-phone`](hermes-phone) | Optional. Phone errands for your bots through your own Twilio number (bookings, quotes, returning a voicemail): the bot writes a call brief, you approve it in the app, and a Grok voice that knows only that brief makes the calls and reports back. US and Canada, outbound only. | Hermes 0.21.6+, your own Twilio account and number, the Grok sign-in or an `XAI_API_KEY`, a public HTTPS address for its call service (e.g. Tailscale Funnel). See its README. |
+| [`hermes-kanban`](hermes-kanban) | Optional. Kanban that sorts itself out: a blocked card wakes the bot that created it, in its own "Kanban desk" chat, to answer it, re-plan or hand part of it to another bot, and only what it can't decide reaches you; a card that keeps blocking asks you once; a flaky block is retried once; a card's files (and its parent cards') are copied into its workspace so a worker in Docker can read them; and `kanban_card_*` hooks for other plugins. | Hermes 0.21.6+. Install it in the default profile and in each bot that works cards. |
 
 Nothing here stores your documents, files or call audio, and no token ever leaves your server.
 
@@ -49,6 +50,7 @@ python -m unittest discover -s hermes-dashboard/tests
 python -m unittest discover -s hermes-bot-fixes/tests
 python -m unittest discover -s hermes-voice/tests
 python -m unittest discover -s hermes-phone/tests
+python -m unittest discover -s hermes-kanban/tests
 ```
 
 `hermes plugins validate <folder>` runs Hermes's own checks on a plugin.

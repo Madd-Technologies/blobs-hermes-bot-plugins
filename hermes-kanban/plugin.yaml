@@ -1,0 +1,9 @@
+name: hermes-kanban
+version: 0.1.0
+description: Kanban that sorts itself out - when a card blocks, the bot that created it is woken in its own "Kanban desk" chat to answer it, re-plan or ask another bot, and only escalates to you when it can't; a card blocking again for the same reason stops and asks you once; a card's files (and its parents') are copied into its workspace so workers in Docker can read them; a flaky block is retried once; and kanban_card_* hooks other plugins can register for.
+author: Madd Technologies
+kind: standalone
+provides_hooks:
+  - kanban_task_claimed
+  - kanban_task_blocked
+  - kanban_task_completed
