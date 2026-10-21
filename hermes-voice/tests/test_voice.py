@@ -4,6 +4,7 @@
 """
 
 import importlib.util
+import contextlib
 import json
 import sys
 from unittest import mock
@@ -83,6 +84,8 @@ class Voice(unittest.TestCase):
         self.api.root = lambda: self.home
         self.api.accounts = lambda: self.accounts.readers(self.core)
         self.api.poster = lambda *args: self.xai(*args)
+        # Hermes's profile scope reads the real Hermes home: the tests stand in for it (one test records what it is asked).
+        self.api._as_bot = lambda bot: contextlib.nullcontext()
         app = FastAPI()
         app.include_router(self.api.router, prefix=BASE)
         self.client = TestClient(app)
@@ -109,6 +112,34 @@ class Voice(unittest.TestCase):
     def assertNoCredentials(self, text):
         for credential in (SIGN_IN, FRESH, KEY):
             self.assertNotIn(credential, text)
+
+    # Naming the bot
+
+    def test_the_bot_can_be_named_as_bot_which_hermes_0_22_allows(self):
+        self.assertEqual(self.client.get(f"{BASE}/bot", params={"bot": "harbor"}).json(), self.bot("harbor").json())
+        self.assertEqual(self.client.put(f"{BASE}/bot", params={"bot": "harbor"}, json={"enabled": True}).status_code, 200)
+
+    def test_naming_no_bot_is_refused(self):
+        self.assertRefused(self.client.get(f"{BASE}/bot"), 400, "invalid")
+
+    def test_each_route_runs_as_the_bot_it_names(self):
+        entered = []
+
+        class Scope:
+            def __init__(self, name):
+                self.name = name
+
+            def __enter__(self):
+                entered.append(self.name)
+
+            def __exit__(self, *exc):
+                return False
+
+        self.api._as_bot = Scope
+        self.client.get(f"{BASE}/bot", params={"bot": "harbor"})
+        self.client.put(f"{BASE}/bot", params={"bot": "harbor"}, json={"enabled": True})
+        self.client.post(f"{BASE}/session", params={"profile": "default"})
+        self.assertEqual(entered, ["harbor", "harbor", "default"])
 
     # Settings
 

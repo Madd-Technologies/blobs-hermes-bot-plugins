@@ -38,6 +38,12 @@ hermes plugins install Madd-Technologies/blobs-hermes-bot-plugins/hermes-voice -
 The sign-in token and keys never leave this server and are never logged. The plugin stores no audio, transcripts or
 conversations, and never asks xAI to keep one.
 
+## Hermes 0.22
+
+Works on Hermes 0.21 and 0.22. The bot routes take `?bot=<bot>` (since 0.1.2; `?profile=` still works on 0.21): Hermes 0.22
+refuses `?profile=` for another bot on a plugin it did not ship. The plugin then enters that bot's own profile itself (the
+same scope Hermes applies for `?profile=`), so the bot's own xAI key and Grok sign-in are read.
+
 ## Develop
 
 ```sh
