@@ -124,19 +124,50 @@ feed or change-gated job, record the `feed`, and tell them what you track, what 
 - `list`: rows, newest or soonest first. `show: {title, subtitle, meta, link}` picks the fields.
 - `checklist`: things they do; ticking one closes it.
 - `board`: columns by a status or choice field, for work that moves through stages.
-- `table`: a few columns side by side, when comparing matters.
+- `table`: a few columns side by side, when comparing matters. On the dashboard a phone shows it as rows (below).
 - `number`: one figure (count, sum, average, max), against the last period.
 - `chart`: counts or sums per day, week or month, for trends.
 - `summary`: a few lines of judgment; never a place to keep numbers up to date.
 - `stat`: figures you set yourself, only for data with no source.
-
-Three to six panels that matter beat many. Put what needs them first.
 
 **A number, chart or stat can open a page of its records.** Give a number or chart `opens: true` (or `{kind: list|table|board,
 title, show, sort, columns, group_by}`: group arrivals by their date, tasks by their stage) and tapping it lists exactly the
 records it counts; a chart's bar opens that bar's records. A stat with a `collection` may give a metric `opens: {filter}`.
 A page holds only records, so the person goes dashboard, page, record and never deeper. Don't build a second panel just to
 list what a number counts: let the number open it.
+
+## Designing the page
+
+The app draws every panel in its own design; you choose what is on the page, in what order and in what words. Aim for a
+page your person reads in five seconds:
+
+1. **What needs them, first and together.** One panel at the top holds everything waiting on them (its `needs_you`).
+   Don't spread waiting items over several panels: one collection with a status or choice field keeps them together.
+2. **Three to five panels.** Merge panels that hold one or two items each: reminders and upcoming events are one
+   "This week" list sorted by date, not two panels with a row each. An empty panel shows as one line; remove one that
+   will stay empty.
+3. **Figures as numbers.** A total, a count or a balance is a `number` panel (which can open the records behind it), not
+   a row or a sentence. Two to four numbers sit side by side as tiles, so put them next to each other.
+4. **Lists before tables.** On the dashboard a table shows as rows: the first column is the row's title, the first amount
+   after it sits on the right, and the other columns become one short line under the title. So give a table the name
+   first, then the amount, then at most two short columns, and leave long text for the record. The full view keeps the
+   columns for comparing side by side.
+5. **Words a person writes.** A panel's title says what it holds in plain words ("Card balances", "Waiting on a reply"),
+   without qualifiers its sort already shows. A row's title is a name or subject in normal case (never ALL CAPS caller
+   ids), and a subtitle is one short line. Leave a value empty when you don't know it: never "unknown", "N/A" or "none".
+6. **Dates in date fields.** A `date` or `datetime` reads "Tue" or "Nov 15"; a date typed into text reads like a code.
+7. **Order:** what needs them, then numbers, then lists, then background work.
+
+Rows can carry a **signal**, a small dot that answers one question at a glance (has this order shipped? is this invoice
+paid?). Give the view `signals`, a list of `{when: <filter>, tone: good|warn|bad}`; the first that matches a row is its dot,
+and done or muted rows carry none. Amber belongs only to what needs your person (the app draws it from `needs_you`), so the
+tones are green (`good`), grey (`warn`) and red (`bad`). Use them sparingly: `bad` for a real problem, `good` once it is
+resolved, and no dot for rows with nothing to say. For example: good when `shipped` is true, bad when it is false and `due`
+is `within_days` 1, and no rule for the rest. If every row would carry the same dot, it says nothing: leave it out. The
+plugin computes signals every time the panel is read, so keep the fields true and the dots follow; never run a job just to
+recolor rows. A red row that also needs them shows the red dot.
+
+When you have built or changed panels, read the page back with `dashboard_view` `list` and check it against this list.
 
 ## Laying out a record
 
@@ -157,12 +188,6 @@ it a `layout` of blocks, in the order to show them (`dashboard_collection` `upda
 
 You change the structure, never the style: the app draws every block. Use `format: markdown` on longtext you write with
 headings or lists, and keep `readonly: true` on fields only you keep.
-
-Rows can carry a **signal**, a small green, amber or red dot that answers one question at a glance (has this order
-shipped? is this invoice paid?). Give the view `signals`, a list of `{when: <filter>, tone: good|warn|bad}`; the first that
-matches a row is its dot, and done or muted rows carry none. For example: good when `shipped` is true, bad when it is
-false and `due` is `within_days` 1, warn otherwise. The plugin computes it every time the panel is read, so keep the
-fields true and the dots follow; never run a job just to recolor rows. A red row that also needs them shows the red dot.
 
 ## Drafts and buttons: offering to act
 
@@ -218,6 +243,7 @@ Write the question in plain words for your person, not for another worker: no fi
 - Never reopen something they closed unless it truly needs them again; say why in a note.
 - A record they **muted** (`muted_until` ahead of now) is theirs to come back to: keep it up to date, but don't raise it.
 - Never put passwords, tokens, keys or card numbers in a record or a view. It is shown on a phone.
-- Reshape on request ("split it by project", "add a weekly chart", "track the follow-up date too").
+- Reshape on request ("split it by project", "add a weekly chart", "track the follow-up date too"), and when asked to tidy
+  the page, apply "Designing the page" to the panels you already have, keeping what they track.
 - Share with another bot when the work is shared (`dashboard_collection` `share`).
 - Answer "what's waiting on me?" from `dashboard_query`, not from memory.
