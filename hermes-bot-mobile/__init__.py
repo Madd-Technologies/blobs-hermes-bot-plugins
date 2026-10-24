@@ -37,9 +37,18 @@ def register(ctx) -> None:
         except Exception as error:
             log.info("hermes-bot-mobile: no %s hook on this Hermes (%s)", name, error)
 
-    # Live room activity needs Hermes 0.21.5+ (the hook); older ones keep the pushes and the room shows "working".
+    # Live room activity needs Hermes 0.21.5+ (the hook); older ones keep the pushes and the room shows "working". One
+    # callback keeps both the member's phase (activity.py) and its turn as it streams (live.py).
     try:
-        ctx.register_hook("on_room_member_activity", RoomActivity().record)
+        from .live import RoomLive
+
+        phases, turns = RoomActivity(), RoomLive()
+
+        def on_room_member_activity(**kwargs):
+            phases.record(**kwargs)
+            turns.record(**kwargs)
+
+        ctx.register_hook("on_room_member_activity", on_room_member_activity)
         watched.append("on_room_member_activity")
     except Exception as error:
         log.info("hermes-bot-mobile: no live room activity on this Hermes (%s)", error)

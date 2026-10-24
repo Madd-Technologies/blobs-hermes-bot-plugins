@@ -56,8 +56,9 @@ panels yourself: the bot does, and reshapes them when you ask.
 
 | Route | What |
 | --- | --- |
-| `GET /status` | version, schema, how many dashboards |
+| `GET /status` | version, schema, how many dashboards, and `features` (`changed`: changes are pushed) |
 | `GET /bots` | per dashboard: open records that need you (each once), views, last change |
+| `/api/ws` event `plugin.hermes-dashboard.changed` | `{versions: {bot: version}, summary?, now}` whenever a dashboard's version moved (0.7.0): the store's SQLite `data_version` is looked at every second, and live panels are read again (at their ttl; a file only once it changed) only for dashboards an app has on screen (hermes-bot-mobile's `PUT /watch`); `summary` is `GET /bots`'s answer, sent when the store was written |
 | `GET /bots/{profile}` | that dashboard's views, computed (a number or chart that adds up a field also says its `unit`, so money and percent figures read `$1,240` and `96%`), their collections' fields, how each is kept, and a version; `?since=<version>` answers `unchanged` without computing; `?fresh=1` reads live sources now |
 | `GET /bots/{profile}/needs-you` | the records on it that need you |
 | `GET /bots/{profile}/views/{view}/page` | the page a number, chart (`?bucket=<start date>`) or stat (`?metric=<n>`) opens: `{title, kind, panel, count, rows or columns, next, group_by?, period?, start?, end?, metric?, fields, live}`; `?offset=` pages 50 at a time |

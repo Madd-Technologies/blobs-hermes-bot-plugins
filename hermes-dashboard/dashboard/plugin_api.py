@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -47,6 +48,28 @@ def _store():
     S, T = _package()
 
     return S, T.open_store()
+
+
+_CHANGES = None
+_CHANGES_LOCK = threading.Lock()
+
+
+def start_changes() -> bool:
+    """Starts pushing dashboard changes to the app (`changes.py`). Called when the dashboard mounts this file; a process
+    without the gateway sends nothing (the app keeps asking on its own)."""
+    global _CHANGES
+
+    try:
+        _package()
+
+        with _CHANGES_LOCK:
+            if _CHANGES is None:
+                changes = importlib.import_module(f"{_PACKAGE}.changes")
+                _CHANGES = changes.DashboardChanges(lambda: _store()[1], mirror=lambda store: _kanban().sync(store))
+
+            return _CHANGES.start()
+    except Exception:
+        return False
 
 
 def _mirror() -> None:
@@ -83,9 +106,13 @@ def _guard(call):
 router = APIRouter()
 
 
+#: What this copy pushes over `/api/ws` (`plugin.hermes-dashboard.changed`), so the app can drop its timers.
+FEATURES = ["changed"]
+
+
 @router.get("/status")
 async def status() -> dict:
-    return _guard(lambda S, store: {"version": _version(), "schema": S.SCHEMA_VERSION, "bots": len(store.summary())})
+    return _guard(lambda S, store: {"version": _version(), "schema": S.SCHEMA_VERSION, "bots": len(store.summary()), "features": FEATURES})
 
 
 @router.get("/bots")
@@ -200,3 +227,6 @@ async def close(record_id: str) -> dict:
 @router.post("/records/{record_id}/reopen")
 async def reopen(record_id: str) -> dict:
     return _guard(lambda S, store: store.set_closed(S.Actor.person(), record_id, False))
+
+
+start_changes()

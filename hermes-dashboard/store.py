@@ -12,6 +12,7 @@ on purpose, and every change is kept in the record's history.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1221,9 +1222,11 @@ class Store:
 
         return f"{change}.{views[0]}.{views[1]}"
 
-    def version(self, profile: str, fresh: bool = False) -> str:
+    def version(self, profile: str, fresh: bool = False, read_live: bool = True) -> str:
         """A cheap token that changes whenever anything on this bot's dashboard could have: a record changed anywhere, one
-        of its views was set or removed, or a live source was read again (its cache expired). Computes no views."""
+        of its views was set or removed, or a live source's rows (or its error) changed. Computes no views. With
+        `read_live` False, live sources are not read again, only their last read is looked at (for a dashboard nobody has
+        on screen)."""
         profile = Actor.bot(profile).name
         now = self._now()
         home = L.bot_home(self.root, profile)
@@ -1232,9 +1235,23 @@ class Store:
             db_version = self._db_version(conn, profile)
             live = [self._view(row) for row in conn.execute("SELECT * FROM views WHERE dashboard = ?", (profile,))]
 
-        as_of = [L.cached(f"{profile}/{view['id']}", view["config"]["source"], home, now, fresh=fresh)["as_of"] or 0 for view in live if view["config"].get("source")]
+        reads = [
+            L.cached(f"{profile}/{view['id']}", view["config"]["source"], home, now, fresh=fresh) if read_live else L.peek(f"{profile}/{view['id']}")
+            for view in live
+            if view["config"].get("source")
+        ]
 
-        return f"{db_version}.{max(as_of, default=0)}"
+        return self._with_live(db_version, reads)
+
+    @staticmethod
+    def _with_live(db_version: str, reads: list) -> str:
+        """The version from the store's and the live sources' parts: the sources' rows (and errors), not their read times."""
+        if not reads:
+            return db_version
+
+        sources = "|".join(f"{entry.get('digest') or entry.get('as_of') or 0}:{1 if entry.get('error') else 0}" for entry in reads)
+
+        return f"{db_version}.{hashlib.sha1(sources.encode('utf-8')).hexdigest()[:12]}"
 
     def _kept(self, view: dict, collection: dict | None) -> dict:
         """How a view stays fresh, for the app's panel menu."""
@@ -1267,7 +1284,7 @@ class Store:
                     records[key] = self._records(conn, key) if row else []
 
             computed = []
-            live_as_of = []
+            live_reads = []
 
             for view in views:
                 collection = collections.get(view["collection"]) if view["collection"] else None
@@ -1282,7 +1299,7 @@ class Store:
                     fields = view["config"].get("source_fields") or []
                     result = Q.compute_view({**view, "updated_at": entry["as_of"] or view["updated_at"]}, fields, L.as_records(entry["rows"], fields, now), now)
                     result["live"] = {"as_of": entry["as_of"], **({"error": entry["error"]} if entry["error"] else {})}
-                    live_as_of.append(entry["as_of"] or 0)
+                    live_reads.append(entry)
                 else:
                     result = Q.compute_view({**view, "updated_at": max(view["updated_at"], max((record["updated_at"] for record in records.get(view["collection"], [])), default=0))}, collection["fields"] if collection else None, records.get(view["collection"], []), now)
 
@@ -1291,7 +1308,7 @@ class Store:
 
             return {
                 "profile": profile,
-                "version": f"{self._db_version(conn, profile)}.{max(live_as_of, default=0)}",
+                "version": self._with_live(self._db_version(conn, profile), live_reads),
                 "views": computed,
                 "collections": {key: {"title": collection["title"], "owner": collection["owner"], "fields": collection["fields"]} for key, collection in collections.items() if collection},
                 "now": now,

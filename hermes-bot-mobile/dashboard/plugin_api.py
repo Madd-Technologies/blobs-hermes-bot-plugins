@@ -109,6 +109,18 @@ def _needs_you_module():
     return importlib.import_module(f"{_PACKAGE}.needs_you")
 
 
+def _watch():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.watch")
+
+
+def _relay_module():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.relay")
+
+
 def _kanban_module():
     _package()
 
@@ -135,6 +147,25 @@ def start_needs_you() -> bool:
     a process without the gateway, like `hermes plugins validate`) just leaves the app on its own check."""
     try:
         return _needs_you().install()
+    except Exception:
+        return False
+
+
+_RELAY = None
+_RELAY_LOCK = threading.Lock()
+
+
+def start_relay() -> bool:
+    """Starts pushing room changes and watched rooms' live turns to the app (`relay.py`). Called when the dashboard mounts
+    this file; a process without the gateway sends nothing (the app keeps reading rooms on its own)."""
+    global _RELAY
+
+    try:
+        with _RELAY_LOCK:
+            if _RELAY is None:
+                _RELAY = _relay_module().RoomRelay()
+
+            return _RELAY.start()
     except Exception:
         return False
 
@@ -213,6 +244,17 @@ class CheckIn(BaseModel):
     key: str = ""
 
 
+class WatchIn(BaseModel):
+    #: Any stable id the app picks for itself (one per install), so its next PUT replaces this one.
+    client: str
+    dashboards: list[str] = []
+    records: list[str] = []
+    rooms: list[str] = []
+    errands: list[str] = []
+    #: Seconds this lasts unless repeated (the app repeats it every 30 s while it stays in front).
+    ttl: float = 90.0
+
+
 class PresenceIn(BaseModel):
     #: The server's id for the phone (from POST /devices).
     device: str
@@ -265,12 +307,30 @@ def _public(row: dict) -> dict:
     }
 
 
+#: What this copy pushes over `/api/ws`, so the app knows which of its own timers it can drop.
+FEATURES = ["needs_you", "watch", "rooms.changed", "room.live"]
+
+
 @router.get("/status")
 def status():
     store_module, _ = _modules()
     store = store_module.DeviceStore()
 
-    return {"devices": [_public(row) for row in store.devices()], "settings": store.settings(), "vapid": store.vapid_public()}
+    return {"devices": [_public(row) for row in store.devices()], "settings": store.settings(), "vapid": store.vapid_public(), "features": FEATURES}
+
+
+@router.put("/watch")
+def put_watch(body: WatchIn):
+    """What this app has on screen now: these dashboards, records, rooms and phone errands are watched (live panels read,
+    rooms' live turns sent) while it repeats this. An empty one means nothing is on screen."""
+    try:
+        kept = _watch().put(body.client, {"dashboards": body.dashboards, "records": body.records, "rooms": body.rooms, "errands": body.errands}, body.ttl)
+    except ValueError as failure:
+        raise HTTPException(status_code=422, detail=str(failure))
+
+    start_relay()
+
+    return {"ok": True, "watching": kept, "features": FEATURES}
 
 
 @router.post("/devices")
@@ -513,3 +573,4 @@ def taildrop_cancel(send_id: str):
 # The watch starts with the dashboard, not with the app's first read: a prompt opened before the app connects is pushed
 # the same way. Tests load this file without a gateway, where this does nothing.
 start_needs_you()
+start_relay()
