@@ -9,6 +9,7 @@ when the app asks; a source that fails keeps showing its last good rows, marked 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -423,21 +424,59 @@ _cache: dict[str, dict] = {}
 _lock = threading.Lock()
 
 
+def _file_mark(source: dict, home: Path):
+    """For a source read from a file in the bot's folder (a sqlite database, a calendar file): the file's (and a sqlite
+    database's write-ahead log's) modification time and size, so a file nobody wrote is not read again. None for a url or a
+    script, which can only be known to have changed by reading them."""
+    path = source.get("path")
+
+    if source.get("kind") not in ("sqlite", "ics") or not path:
+        return None
+
+    try:
+        file = _inside(home / path if not Path(path).is_absolute() else Path(path), home, "a source file")
+        marks = [file.stat()]
+        wal = file.with_name(file.name + "-wal")
+
+        if source["kind"] == "sqlite" and wal.exists():
+            marks.append(wal.stat())
+
+        return tuple((mark.st_mtime_ns, mark.st_size) for mark in marks)
+    except (OSError, SourceError):
+        return None
+
+
+def _digest(rows: list) -> str:
+    """A fingerprint of the rows, so a dashboard's version moves when the data does, not each time it is read."""
+    return hashlib.sha1(json.dumps(rows, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 def cached(key: str, source: dict, home: Path, now: float, fresh: bool = False) -> dict:
-    """`{rows, as_of, error}` for a view's source: the last read while it is younger than the source's ttl, else a new
-    read. A failed read keeps the last good rows and reports the error."""
+    """`{rows, as_of, error, digest}` for a view's source: the last read while it is younger than the source's ttl (or,
+    for a file, while the file is unchanged), else a new read. A failed read keeps the last good rows and reports the
+    error."""
     with _lock:
         entry = _cache.get(key)
 
         if entry and not fresh and entry["source"] == source and now - entry["checked"] < source["ttl"]:
             return entry
 
+    if entry and not fresh and entry["source"] == source and entry.get("mark") is not None and entry.get("mark") == _file_mark(source, home):
+        entry = {**entry, "checked": now}
+
+        with _lock:
+            _cache[key] = entry
+
+        return entry
+
+    mark = _file_mark(source, home)
+
     try:
         rows, as_of, error = read(source, home, now), int(now), None
     except (SourceError, OSError, ValueError) as failure:
         rows, as_of, error = (entry["rows"], entry["as_of"], str(failure)) if entry and entry["source"] == source else ([], None, str(failure))
 
-    entry = {"source": source, "rows": rows, "as_of": as_of, "error": error, "checked": now}
+    entry = {"source": source, "rows": rows, "as_of": as_of, "error": error, "checked": now, "mark": mark if error is None else None, "digest": _digest(rows)}
 
     with _lock:
         _cache[key] = entry

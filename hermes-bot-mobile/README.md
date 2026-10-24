@@ -45,6 +45,24 @@ the `on_room_member_activity` hook (Hermes 0.21.5+) this keeps what each bot is 
 name), thinking, writing, or waiting for your OK. Only the phase, the tool's name and when it began are kept, never text,
 tool arguments or output, in one small file per room, written only when a phase changes.
 
+## Rooms, pushed (0.2.0)
+
+The app no longer reads every room on a timer. In the dashboard, one small thread (`relay.py`) sends two events over
+`/api/ws` with Hermes's `broadcast_plugin_event`:
+
+- `plugin.hermes-bot-mobile.rooms.changed` `{rooms: {room_id: {latest_seq, revision, updated_at}}}` whenever a room's log or
+  settings moved: the room store's SQLite `data_version` is looked at every second (free while nothing was written), and the
+  rooms are listed only when it moved. A turn starting and settling are log events, so the app reads a room in full only then.
+- `plugin.hermes-bot-mobile.room.live` `{room_id, members: {member_id: {turn, phase, tool, text, cut, steps, started,
+  updated}}, at}`: each member's turn as it streams (`live.py`): the end of its reply so far (8,000 characters at most) and
+  its tool steps, for the rooms an app has on screen. In Hermes 0.22 the messaging gateway runs members' turns, so the hook
+  writes them to `rooms/<room_id>.live.json` (at most every 0.25 s while a member writes) and the dashboard reads the file
+  of each watched room every 0.2 s.
+
+`PUT /watch` tells the server what an app has on screen (dashboards, records, rooms, phone errands); it lasts its `ttl`
+unless repeated. hermes-dashboard reads the same set (`sys.modules["hermes_mobile_watch"]`) to read live panels only for
+dashboards someone looks at.
+
 ## Needs you, pushed
 
 Since 0.1.7 the app's Needs you is pushed, not polled. Hermes keeps every prompt it has put to a client (an approval, a
@@ -237,7 +255,8 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 
 | Route | What |
 | --- | --- |
-| `GET /status` | registered phones, settings, the server's VAPID public key |
+| `GET /status` | registered phones, settings, the server's VAPID public key, and `features` (what this copy pushes) |
+| `PUT /watch` | `{client, dashboards, records, rooms, errands, ttl}`: what this app has on screen now (an empty one: nothing) |
 | `POST /devices`, `DELETE /devices/{id}` | register or remove a phone |
 | `PUT /settings` | each bot on or `off` (`all` and `needs_you` both mean on) |
 | `PUT /presence` | what the phone has on screen (no pushes for it) |
