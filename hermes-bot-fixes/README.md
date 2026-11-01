@@ -72,6 +72,13 @@ and logged), so a newer Hermes that changed it simply goes unpatched.
   - The gateway loads its plugins before its own startup code, so the fix knows the gateway by its command line
     (`hermes gateway run`) and applies as soon as that code has loaded. Its log line says `gateway out of rooms waiting`,
     then `gateway rooms fix applied`. 0.6.0 checked too early and never applied after a restart.
+- **A group room answers a dozen messages, then goes quiet for good.** Hermes 0.22 plans each room turn from a checkpoint
+  that keeps a thread's newest 24 messages and deletes older rows one by one, so the cut can fall inside a conversation:
+  a person's message goes while the bot's answer to it and that turn's outcome stay. The planner then refuses the whole
+  room ("turn.settled references no matching user discussion"), keeps the error to itself, and every later message
+  waits forever; in a two-bot room that happens on the 13th message. Now, when the planner hits that error, it plans
+  again without the leftovers of conversations the checkpoint already cut (their answers and outcomes; what each bot
+  has seen is kept apart, in the checkpoint's watermarks). Any other planning error is raised as before.
 
 ## Hermes 0.22
 
@@ -85,6 +92,8 @@ Works on Hermes 0.21 and 0.22 (since 0.7.0). What changes on 0.22:
   protocol), so the rooms the app makes through the dashboard keep running in the dashboard, where their approvals and
   questions reach the app.
 - Capture, compaction, hand-off, reply once and the database guard apply unchanged.
+- **Room trim** is a 0.22 fix (still needed on the 0.22.5 canary). 0.21.6 plans the same 30-message room without it, so
+  there it is in place but never acts.
 
 ## Install
 
@@ -111,4 +120,5 @@ python -m unittest discover -s hermes-bot-fixes/tests
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_handoff.py [path to a Hermes checkout]
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_dmreply.py [path to a Hermes checkout]
 ~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_inbox.py [path to a Hermes checkout]
+~/.hermes/hermes-agent/venv/bin/python hermes-bot-fixes/tests/integration_roomtrim.py [path to a Hermes checkout]
 ```
