@@ -28,6 +28,29 @@ def done(returncode=0, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+HERMES_LOG = Path("/home/scout/.hermes/logs/gateway-restart.log")
+
+REFUSAL = """
+=== gateway-restart started 2026-10-28 09:00:00 ===
+⏳ User service restarting gracefully (PID 600) — waiting up to 2025s for in-flight turns + drain...
+✓ User service restarted (PID 601)
+
+=== gateway-restart started 2026-11-01 23:39:05 ===
+✗ Refusing to restart the gateway: 2 live session(s) would be interrupted.
+  • cron job 0123456789ab (Weather feed) in-process pid 601, running 10s
+  • cron job ba9876543210 (Orion's digest) in-process pid 601, running 10s
+  Let them finish, or interrupt them deliberately:
+    hermes gateway restart --yes   # interrupts 2 live session(s)
+"""
+
+RESTARTED = """
+=== gateway-restart started 2026-11-02 10:00:00 ===
+⏳ User service restarting gracefully (PID 601) — waiting up to 2025s for in-flight turns + drain...
+⏳ User service process started (PID 602); waiting for gateway runtime...
+✓ User service restarted (PID 602)
+"""
+
+
 class FakeProc:
     """A `hermes gateway restart` child: `wait` answers with its exit code, or times out."""
 
@@ -48,7 +71,7 @@ class FakeSystem(restart.System):
 
     def __init__(self, *, platform="linux", cgroup=USER_CGROUP, uid=1000, euid=1000, systemd=True, container=False,
                  environ=None, tools=("systemd-run", "systemctl"), busy=(), gateway_pid=None, gateway_cgroup=GATEWAY_CGROUP,
-                 spawner=None, route=True, pid=4242, started=1000.0, show=None, systemd_run=None):
+                 spawner=None, route=True, pid=4242, started=1000.0, show=None, systemd_run=None, gateway_work=None, logs=None):
         self.platform = platform
         self.environ = environ if environ is not None else {"PATH": "/usr/bin", "HOME": "/home/scout"}
         self._cgroup, self._uid, self._euid, self._systemd, self._container = cgroup, uid, euid, systemd, container
@@ -62,6 +85,10 @@ class FakeSystem(restart.System):
         #: pids of earlier dashboards that are still running.
         self.living = set()
         self.proc = FakeProc()
+        #: What the gateway runs that its restart would interrupt ([] nothing, None: this Hermes cannot say).
+        self.work = None if gateway_work is None else list(gateway_work)
+        #: Log files by path, as `hermes gateway restart` wrote them.
+        self.logs = dict(logs or {})
 
     def pid(self):
         return self._pid
@@ -120,6 +147,15 @@ class FakeSystem(restart.System):
 
     def gateway_spawner(self):
         return self._spawner
+
+    def gateway_work(self):
+        return None if self.work is None else list(self.work)
+
+    def gateway_log(self):
+        return HERMES_LOG if self._spawner else None
+
+    def read_tail(self, path, size=16384):
+        return self.logs.get(Path(path))
 
     def scheduled(self):
         return [argv for argv in self.ran if argv[0] == SYSTEMD_RUN]
@@ -513,7 +549,7 @@ class Gateway(Base):
         self.assertEqual(proc.waited, [restart.GATEWAY_WAIT_S])
         row = self.rows()[-1]
         self.assertEqual(row["outcome"], "scheduled")
-        self.assertEqual({key: row["gateway"][key] for key in ("how", "pid", "outcome", "exit_code", "reused")}, {"how": "hermes", "pid": 31337, "outcome": "exited", "exit_code": 0, "reused": False})
+        self.assertEqual({key: row["gateway"][key] for key in ("how", "pid", "outcome", "exit_code", "reused")}, {"how": "hermes", "pid": 31337, "outcome": "restarted", "exit_code": 0, "reused": False})
 
     def test_without_hermess_spawner_it_runs_the_cli_the_same_way(self):
         restarter = self.restarter(environ={"PATH": "/usr/bin", "HERMES_HOME": "/home/scout/.hermes"})
@@ -569,6 +605,160 @@ class Gateway(Base):
         self.assertEqual(self.rows()[-1]["carried_out_at"], self.rows()[-1]["idle_at"])
 
 
+class GatewayWork(Base):
+    """Hermes 0.22's `gateway restart` refuses while the gateway runs a turn, a routine or a background delegation."""
+
+    def spawner(self, *results, accepts_interrupt=True):
+        """Hermes's spawner, answering each call with the next (exit code, log text, gateway pid after) in turn."""
+        self.calls = []
+        queue = list(results)
+
+        def take(profile, interrupt):
+            self.calls.append({"profile": profile, "interrupt": interrupt})
+            code, text, pid = queue.pop(0) if len(queue) > 1 else queue[0]
+            self.system.logs[HERMES_LOG] = text
+            self.system._gateway_pid = pid
+
+            return FakeProc(code=code, pid=900 + len(self.calls)), False
+
+        if accepts_interrupt:
+            def spawn(profile=None, *, interrupt=False):
+                return take(profile, interrupt)
+        else:
+            def spawn(profile=None):
+                return take(profile, None)
+
+        return spawn
+
+    def test_now_interrupts_the_gateways_work_like_hermess_own_button(self):
+        restarter = self.restarter(gateway_pid=601)
+        self.system._spawner = self.spawner((0, RESTARTED, 602))
+        restarter.request("now", include_gateway=True)
+
+        self.assertEqual(self.calls, [{"profile": None, "interrupt": True}])
+        row = self.rows()[-1]
+        self.assertEqual((row["gateway"]["outcome"], row["gateway"]["interrupt"], row["gateway"]["pid_before"], row["gateway"]["pid_after"]), ("restarted", True, 601, 602))
+        self.assertIn("✓ User service restarted (PID 602)", row["gateway"]["detail"])
+        self.assertNotIn("Refusing", row["gateway"]["detail"])  # only this restart's section
+        self.assertIsNone(row["detail"])
+        self.assertEqual(row["outcome"], "scheduled")
+
+    def test_a_hermes_without_interrupt_is_called_as_before(self):
+        restarter = self.restarter(gateway_pid=601)
+        self.system._spawner = self.spawner((0, RESTARTED, 602), accepts_interrupt=False)
+        restarter.request("now", include_gateway=True)
+
+        self.assertEqual(self.calls, [{"profile": None, "interrupt": None}])
+        self.assertFalse(self.rows()[-1]["gateway"]["interrupt"])
+
+    def test_a_refusal_is_kept_with_what_it_said_and_the_dashboard_still_restarts(self):
+        restarter = self.restarter(gateway_pid=601)
+        self.system._spawner = self.spawner((1, REFUSAL, 601), accepts_interrupt=False)
+        restarter.request("now", include_gateway=True)
+
+        row = self.rows()[-1]
+        self.assertEqual((row["gateway"]["outcome"], row["gateway"]["exit_code"], row["outcome"]), ("refused", 1, "scheduled"))
+        self.assertTrue(row["gateway"]["detail"].startswith("✗ Refusing to restart the gateway: 2 live session(s)"))
+        self.assertEqual(row["detail"], "The gateway did not restart: Refusing to restart the gateway: 2 live session(s) would be interrupted.")
+
+    def test_an_exit_without_the_refusal_is_a_failure(self):
+        restarter = self.restarter(gateway_pid=601)
+        self.system._spawner = self.spawner((1, "\n=== gateway-restart started x ===\n✗ Gateway service restart failed.\n", 601))
+        restarter.request("now", include_gateway=True)
+
+        row = self.rows()[-1]
+        self.assertEqual(row["gateway"]["outcome"], "failed")
+        self.assertEqual(row["detail"], "The gateway did not restart: Gateway service restart failed.")
+
+    def test_a_gateway_still_on_the_same_process_did_not_restart(self):
+        restarter = self.restarter(gateway_pid=601)
+        self.system._spawner = self.spawner((0, "", 601))
+        restarter.request("now", include_gateway=True)
+
+        row = self.rows()[-1]
+        self.assertEqual(row["gateway"]["outcome"], "not_restarted")
+        self.assertEqual(row["detail"], "The gateway did not restart: It is still on the same process.")
+
+    def test_a_restart_still_running_says_so(self):
+        restarter = self.restarter(gateway_pid=601)
+        self.system._spawner = self.spawner((None, "", 601))
+        restarter.request("now", include_gateway=True)
+
+        self.assertEqual(self.rows()[-1]["detail"], "The gateway did not restart: `hermes gateway restart` was still running after 30 minutes.")
+
+    def test_idle_waits_for_the_gateways_own_work_then_restarts_without_interrupting(self):
+        restarter = self.restarter(busy=[], gateway_pid=601, gateway_work=["cron job 0123456789ab (Weather feed) running 10s"])
+        self.system._spawner = self.spawner((0, RESTARTED, 602))
+        self.clock.on_wait = lambda polls: setattr(self.system, "work", [] if polls >= 2 else self.system.work)
+        restarter.request("idle", include_gateway=True)
+
+        self.assertEqual(len(self.clock.waits), 2)
+        self.assertEqual(self.calls, [{"profile": None, "interrupt": False}])
+        self.assertEqual((self.rows()[-1]["gateway"]["outcome"], self.rows()[-1]["outcome"]), ("restarted", "scheduled"))
+
+    def test_without_the_gateway_its_work_is_not_waited_for(self):
+        restarter = self.restarter(busy=[], gateway_work=["cron job 0123456789ab (Weather feed) running 10s"])
+        restarter.request("idle")
+
+        self.assertEqual(self.clock.waits, [])
+        self.assertEqual(self.rows()[-1]["outcome"], "scheduled")
+
+    def test_a_hermes_that_cannot_say_does_not_hold_the_wait(self):
+        restarter = self.restarter(busy=[], gateway_pid=601, gateway_work=None)
+        self.system._spawner = self.spawner((0, RESTARTED, 602))
+        restarter.request("idle", include_gateway=True)
+
+        self.assertEqual(self.clock.waits, [])
+        self.assertEqual(self.rows()[-1]["gateway"]["outcome"], "restarted")
+
+    def test_idle_looks_again_when_a_routine_started_in_between(self):
+        restarter = self.restarter(busy=[], gateway_pid=601, gateway_work=[])
+        self.system._spawner = self.spawner((1, REFUSAL, 601), (0, RESTARTED, 602))
+        restarter.request("idle", include_gateway=True)
+
+        self.assertEqual(self.calls, [{"profile": None, "interrupt": False}] * 2)
+        self.assertEqual(self.clock.waits, [restart.GATEWAY_RETRY_S])
+        row = self.rows()[-1]
+        self.assertEqual((row["gateway"]["outcome"], row["outcome"], row["detail"]), ("restarted", "scheduled", None))
+
+    def test_idle_gives_up_at_its_deadline_and_restarts_nothing(self):
+        restarter = self.restarter(busy=[], gateway_pid=601, gateway_work=[])
+        self.system._spawner = self.spawner((1, REFUSAL, 601))
+        restarter.request("idle", idle_timeout_s=30, include_gateway=True)
+
+        row = self.rows()[-1]
+        self.assertEqual(row["outcome"], "timed_out")
+        self.assertEqual(row["gateway"]["outcome"], "refused")
+        self.assertEqual(self.system.scheduled(), [])
+        self.assertEqual(len(self.calls), 2)  # at 0 s and 15 s; at 30 s the wait is over
+
+    def test_a_retry_while_waiting_can_be_cancelled(self):
+        restarter = self.restarter(busy=[], gateway_pid=601, gateway_work=[], deferred=True)
+        self.system._spawner = self.spawner((1, REFUSAL, 601))
+        self.clock.on_wait = lambda polls: restarter.cancel()
+        restarter.request("idle", include_gateway=True)
+        self.deferred.pop()()
+
+        self.assertEqual(self.rows()[-1]["outcome"], "cancelled")
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.system.scheduled(), [])
+
+    def test_status_names_the_gateways_work(self):
+        status = self.restarter(busy=[], gateway_work=["cron job 0123456789ab (Weather feed) running 10s"]).status()
+        self.assertEqual(status["gateway"]["busy"], ["cron job 0123456789ab (Weather feed) running 10s"])
+
+
+class LogSection(unittest.TestCase):
+    def test_only_the_last_restart(self):
+        self.assertEqual(restart.log_section(REFUSAL).splitlines()[0], "✗ Refusing to restart the gateway: 2 live session(s) would be interrupted.")
+        self.assertEqual(restart.log_section(None), "")
+        self.assertEqual(len(restart.log_section("=== gateway-restart started x ===\n" + "y" * 2000)), restart.DETAIL_MAX)
+
+    def test_this_plugins_own_log_header(self):
+        text = "\n=== gateway restart started 2026-11-02 10:00:00 ===\nStarting gateway...\n"
+        self.assertEqual(restart.log_section(text), "Starting gateway...")
+
+
 class Log(Base):
     def test_keeps_the_last_twenty_with_private_permissions(self):
         restarter = self.restarter()
@@ -622,7 +812,7 @@ class Status(Base):
 
         self.assertEqual(status, {
             "supported": True, "why": None, "unit": UNIT, "scope": "user", "pid": 4242, "started_at": 1000.0,
-            "now": self.clock.now, "busy": busy, "gateway": {"route": True, "restart": "hermes", "same_unit": False},
+            "now": self.clock.now, "busy": busy, "gateway": {"busy": None, "route": True, "restart": "hermes", "same_unit": False},
             "last": None, "retry_after": 0,
         })
 

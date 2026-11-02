@@ -14,12 +14,19 @@ The gateway goes through Hermes's own restart (the function behind `POST /api/ga
 dashboard is restarted only after that has finished, because `hermes gateway restart` runs inside this cgroup too and
 waits while the gateway lets its turns finish. See the README.
 
+Since Hermes 0.22 that restart refuses (exit 1, nothing stopped) while the gateway runs anything of its own: a turn, a
+routine, a background delegation. So "now" passes Hermes's `--interrupt`, as its own restart button does, and "idle"
+waits for the gateway's work as well as this dashboard's chats, and looks again if a routine started in between. What
+the restart printed is kept with the request, and a gateway still on the same process afterwards is not counted as
+restarted.
+
 Requests and their outcomes are kept in `restarts.json` (the last 20) under the plugin's data folder, so the dashboard
 that comes back can say when it was restarted. Off systemd (macOS, a container, a terminal) it says why it cannot.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import os
@@ -52,6 +59,13 @@ POLL_S = 3.0
 DELAY_S = 2
 #: The longest an idle-then-gateway restart waits for `hermes gateway restart` (it waits for the gateway's own drain).
 GATEWAY_WAIT_S = 1800.0
+#: After the gateway refused (it had work), look again no sooner than this: Hermes folds restarts asked within 10 s of
+#: the last one into that one, so an earlier retry would only read the same refusal back.
+GATEWAY_RETRY_S = 15.0
+#: How much of what `hermes gateway restart` printed is kept with the request.
+DETAIL_MAX = 600
+#: What Hermes's restart prints when the gateway's work stopped it (`gateway_lifecycle_guards`).
+GATEWAY_REFUSAL = "Refusing to restart the gateway"
 #: How long the "can this be restarted" answer (a `systemctl show`) is reused.
 PROBE_TTL_S = 30.0
 #: A restart scheduled this long ago, while the same dashboard still answers, did not happen.
@@ -203,6 +217,30 @@ def gateway_cli_env(environ) -> dict[str, str]:
     env["HERMES_NONINTERACTIVE"] = "1"
 
     return env
+
+
+def log_section(text: str | None) -> str:
+    """The output of the last `gateway restart` in a log that collects them, each after a `=== gateway... started` line
+    (Hermes's `gateway-restart.log`, or this plugin's own): its non-blank lines, at most `DETAIL_MAX` characters."""
+    lines = (text or "").splitlines()
+    start = max((index for index, line in enumerate(lines) if line.startswith("=== gateway") and " started " in line), default=-1)
+    body = "\n".join(line.rstrip() for line in lines[start + 1:] if line.strip())
+
+    return body[:DETAIL_MAX]
+
+
+def first_line(text: str | None) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+    return lines[0][:300] if lines else ""
+
+
+def accepts_interrupt(spawner: Callable) -> bool:
+    """Whether Hermes's spawner takes `interrupt` (0.22+; 0.21's restart has no live-work refusal to get past)."""
+    try:
+        return "interrupt" in inspect.signature(spawner).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def last_line(text: str | None) -> str:
@@ -400,6 +438,47 @@ class System:
 
         return spawn if callable(spawn) else None
 
+    def gateway_work(self) -> list[str] | None:
+        """What the gateway is running that its restart would interrupt (a turn, a routine, a background delegation),
+        one line each, as Hermes's restart names it; [] when nothing. None when this Hermes cannot say (before 0.22, or
+        no gateway answers its control socket): then the restart itself decides."""
+        try:
+            from hermes_cli.gateway_lifecycle_guards import _candidate_homes, refusal_lines
+        except Exception:
+            return None
+
+        try:
+            lines = refusal_lines("restart", _candidate_homes())
+        except Exception:
+            return None
+
+        if not lines:
+            return []
+
+        named = [line.strip()[1:].strip() for line in lines if line.strip().startswith("•")]
+
+        return named or [first_line(lines[0])]
+
+    def gateway_log(self) -> Path | None:
+        """The log Hermes's spawner writes `hermes gateway restart`'s output to (`~/.hermes/logs/gateway-restart.log`)."""
+        module = sys.modules.get("hermes_cli.web_server_gateway")
+        folder, names = getattr(module, "_ACTION_LOG_DIR", None), getattr(module, "_ACTION_LOG_FILES", None)
+
+        if folder is None or not isinstance(names, dict) or not names.get("gateway-restart"):
+            return None
+
+        return Path(folder) / names["gateway-restart"]
+
+    def read_tail(self, path: Path, size: int = 16384) -> str | None:
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - size))
+
+                return handle.read().decode("utf-8", "replace")
+        except OSError:
+            return None
+
 
 # -- the restarter ---------------------------------------------------------------------------------------------------
 
@@ -576,6 +655,7 @@ class Restarter:
             "now": now,
             "busy": self.system.sessions(titles=True),
             "gateway": {
+                "busy": self.system.gateway_work(),
                 "route": self.system.gateway_route(),
                 "restart": "hermes" if self.system.gateway_spawner() else "cli",
                 "same_unit": support.get("gateway_same_unit"),
@@ -682,7 +762,17 @@ class Restarter:
                 return
 
             if job.include_gateway:
-                self._restart_gateway(job)
+                while self._restart_gateway(job) == "refused" and job.mode == "idle":
+                    # A routine or a turn started between the look and the restart: wait for it like the rest.
+                    with self._lock:
+                        if job.cancelled.is_set() or self._job is not job:
+                            return
+
+                        job.stage = "waiting"
+                        self._update(job.id, outcome="waiting")
+
+                    if self._wait(job.cancelled, GATEWAY_RETRY_S) or not self._wait_for_idle(job, after_refusal=True):
+                        return
 
             with self._lock:
                 job.stage = "scheduling"
@@ -696,21 +786,28 @@ class Restarter:
                 if self._job is job:
                     self._job = None
 
-    def _wait_for_idle(self, job: Job) -> bool:
-        """Wait until no chat is running a turn, then claim the job (True); False once cancelled, replaced or timed out."""
+    def _wait_for_idle(self, job: Job, after_refusal: bool = False) -> bool:
+        """Wait until no chat is running a turn, nor (with the gateway) anything of the gateway's own, then claim the job
+        (True); False once cancelled, replaced or timed out."""
         while True:
             with self._lock:
                 if job.cancelled.is_set() or self._job is not job:
                     return False
 
             busy = self.system.sessions()
+
+            if busy is not None and not busy and job.include_gateway:
+                # None: this Hermes cannot say, and its restart refuses by itself if it must (then this looks again).
+                busy = list(self.system.gateway_work() or [])
+
             now = self._clock()
 
             with self._lock:
                 if job.cancelled.is_set() or self._job is not job:
                     return False
 
-                if busy is not None and not busy:
+                # Nothing to wait for, unless the gateway refused anyway (its work is not always named) and the wait is over.
+                if busy is not None and not busy and not (after_refusal and now >= job.deadline):
                     job.stage = "restarting_gateway" if job.include_gateway else "scheduling"
                     self._update(job.id, outcome=job.stage, idle_at=now)
 
@@ -720,6 +817,9 @@ class Restarter:
                     self._job = None
                     count = len(busy or [])
                     detail = f"Timed out with {count} still busy." if busy is not None else "Lost sight of the running chats."
+
+                    if after_refusal and not count:
+                        detail = "Timed out: the gateway kept refusing to restart while it had work."
                     self._update(job.id, outcome="timed_out" if busy is not None else "failed", busy_left=count, finished_at=now, detail=detail)
 
                     return False
@@ -727,33 +827,73 @@ class Restarter:
             if self._wait(job.cancelled, max(0.0, min(POLL_S, job.deadline - now))):
                 return False
 
-    def _restart_gateway(self, job: Job) -> None:
-        """Hermes's own gateway restart, waited for: it runs in this cgroup, so the dashboard must outlive it."""
+    def _restart_gateway(self, job: Job) -> str:
+        """Hermes's own gateway restart, waited for (it runs in this cgroup, so the dashboard must outlive it). Answers
+        what became of it: restarted, refused (the gateway had work), not_restarted, still_running or failed."""
         now = self._clock()
         self._update(job.id, outcome="restarting_gateway", carried_out_at=now, gateway={"started_at": now})
         spawner = self.system.gateway_spawner()
+        before = self.system.gateway_pid()
+        # "now" may cut the gateway's work off, as Hermes's own restart button does; "idle" waited for it instead.
+        interrupt = job.mode == "now"
 
         try:
             if spawner is not None:
-                proc, reused = spawner(None)
-                how = "hermes"
+                interrupt = interrupt and accepts_interrupt(spawner)
+                proc, reused = spawner(None, interrupt=True) if interrupt else spawner(None)
+                how, log_path = "hermes", self.system.gateway_log()
             else:
-                proc = self.system.spawn(gateway_cli_argv(), self.folder / "gateway-restart.log", gateway_cli_env(self.system.environ))
-                reused, how = False, "cli"
+                log_path = self.folder / "gateway-restart.log"
+                proc = self.system.spawn(gateway_cli_argv(), log_path, gateway_cli_env(self.system.environ))
+                reused, how, interrupt = False, "cli", False
         except Exception as failure:
-            self._update(job.id, gateway={"started_at": now, "outcome": "failed", "detail": str(failure)[:300]})
+            detail = str(failure)[:300]
+            self._update(job.id, gateway={"started_at": now, "outcome": "failed", "detail": detail}, detail=f"The gateway did not restart: {detail}")
 
-            return
+            return "failed"
 
         try:
             code = proc.wait(timeout=GATEWAY_WAIT_S)
         except subprocess.TimeoutExpired:
             code = None
 
-        self._update(job.id, gateway={
-            "started_at": now, "how": how, "reused": bool(reused), "pid": getattr(proc, "pid", None),
-            "outcome": "exited" if code is not None else "still_running", "exit_code": code, "finished_at": self._clock(),
-        })
+        printed = log_section(self.system.read_tail(log_path)) if log_path else ""
+        after = self.system.gateway_pid()
+
+        if code is None:
+            outcome = "still_running"
+        elif code != 0:
+            outcome = "refused" if GATEWAY_REFUSAL in printed else "failed"
+        elif before is not None and after == before:
+            outcome = "not_restarted"
+        else:
+            outcome = "restarted"
+
+        gateway = {
+            "started_at": now, "how": how, "reused": bool(reused), "interrupt": interrupt, "pid": getattr(proc, "pid", None),
+            "outcome": outcome, "exit_code": code, "finished_at": self._clock(), "pid_before": before, "pid_after": after,
+        }
+
+        if printed:
+            gateway["detail"] = printed
+
+        update: dict[str, Any] = {"gateway": gateway}
+
+        if outcome == "restarted":
+            update["detail"] = None  # a retry that got through clears what the refusal said
+        else:
+            why = first_line(printed).lstrip("✗⚠ ") or {
+                "still_running": "`hermes gateway restart` was still running after 30 minutes.",
+                "not_restarted": "It is still on the same process.",
+            }.get(outcome, f"`hermes gateway restart` exited with {code}.")
+            update["detail"] = f"The gateway did not restart: {why}"[:300]
+
+        self._update(job.id, **update)
+
+        if outcome != "restarted":
+            log.warning("hermes-bot-mobile: gateway restart for %s: %s (exit %s) %s", job.id, outcome, code, first_line(printed))
+
+        return outcome
 
     def _schedule(self, entry_id: str, support: dict) -> tuple[bool, str]:
         """Ask systemd to restart this dashboard's unit `DELAY_S` seconds from now, from outside its cgroup."""
