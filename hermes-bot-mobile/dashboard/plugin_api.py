@@ -1,7 +1,8 @@
 """The phone app's side of hermes-bot-mobile: register a device, change how loud each bot is, send a test, read what
 each bot in a group room is doing right now, set up where a bot's commands run (its SSH key and a connection check),
 restart this dashboard (and the gateway) from the app, Taildrop a file from this server to one of the person's devices,
-push what waits on the person (Needs you) to the app the moment it changes, and answer a kanban worker's approval.
+push what waits on the person (Needs you) to the app the moment it changes, answer a kanban worker's approval, and hand
+back a chat's history light (`history.py`).
 
 Mounted by `hermes serve` under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's own sign-in, so only someone
 who can already use the server can reach it. Hermes imports this file on its own, apart from the plugin package,
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import inspect
 import sys
 import threading
 import time
@@ -568,6 +570,145 @@ def taildrop_cancel(send_id: str):
         return _sender().cancel(send_id)
     except taildrop.Refused as refusal:
         return _refusal(refusal)
+
+
+def _history():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.history")
+
+
+def _hermes_history():
+    """Hermes's own history readers (its `/api/sessions/{id}/messages` route and the helpers beside it, 0.22+), or None where
+    they are missing: then this copy offers no light history and the app reads `/api/sessions` as before."""
+    try:
+        from hermes_cli.web_routers import sessions as hermes_sessions
+    except Exception:
+        return None
+
+    needed = ("get_session_messages", "_with_db", "_resolve_session_id", "_project_for_display", "_history_profile_home")
+
+    return hermes_sessions if all(callable(getattr(hermes_sessions, name, None)) for name in needed) else None
+
+
+#: A page of history holds the person's newest this many turns (each with all its replies and tool steps).
+HISTORY_TURNS = 20
+#: Hermes hands back at most this many rows per read.
+HISTORY_READ = 500
+#: The most rows read for one page: a single turn with more tool steps than this is cut, and the rest comes next page.
+HISTORY_ROWS = 1500
+#: The most rows fetched whole in one ask.
+HISTORY_IDS = 100
+
+
+async def _hermes_messages(hermes, session_id: str, bot: str | None, limit: int, offset: int) -> dict:
+    """One page of Hermes's own history read, newest first by offset, with stored pictures as `[image]`."""
+    accepted = inspect.signature(hermes.get_session_messages).parameters
+    wanted = {"profile": bot, "limit": limit, "offset": offset, "order": "latest", "include_compacted": True, "inline_images": False}
+
+    return await hermes.get_session_messages(session_id, **{key: value for key, value in wanted.items() if key in accepted})
+
+
+@router.get("/history/{session_id}")
+async def chat_history(session_id: str, bot: str | None = None, turns: int = HISTORY_TURNS, offset: int = 0):
+    """A chat's newest `turns` of the person's turns, light (see `history.py`): what `/api/sessions/{id}/messages` would hand
+    back for them, without what the app never draws and with long tool outputs cut. `offset` counts the rows the app
+    already holds, newest first, as Hermes's own paging does. `pagination.has_older` says whether there is more."""
+    hermes = _hermes_history()
+
+    if hermes is None:
+        raise HTTPException(status_code=404, detail="This Hermes has no light history; read /api/sessions instead.")
+
+    if bot is not None:
+        _known_bot(bot)
+
+    history = _history()
+    turns, offset = max(1, min(int(turns), 100)), max(0, int(offset))
+    collected: list = []
+    read, more, page = 0, False, {}
+
+    while True:
+        page = await _hermes_messages(hermes, session_id, bot, HISTORY_READ, offset + read)
+        rows = [row for row in page.get("messages") or [] if isinstance(row, dict)]
+        collected = rows + collected
+        read += len(rows)
+
+        if len(rows) < HISTORY_READ:
+            break
+
+        if history.turns_in(collected) >= turns or read >= HISTORY_ROWS:
+            more = True
+            break
+
+    kept = history.cut_to_turns(collected, turns)
+    rows = history.slim_rows(kept)
+
+    return {
+        "session_id": page.get("session_id", session_id),
+        "profile": page.get("profile"),
+        "messages": rows,
+        "pagination": {
+            "order": "latest",
+            "offset": offset,
+            "limit": len(rows),
+            "returned": len(rows),
+            "turns": history.turns_in(kept),
+            "has_older": more or len(kept) < len(collected),
+        },
+    }
+
+
+@router.get("/history/{session_id}/rows")
+async def chat_history_rows(session_id: str, ids: str, bot: str | None = None):
+    """Rows of a chat whole (by their ids, comma-separated): a tool step's full output when the app is about to show it. Only
+    rows of that chat (and the chats it was compressed from) come back, and never what the app does not draw."""
+    hermes = _hermes_history()
+
+    if hermes is None:
+        raise HTTPException(status_code=404, detail="This Hermes has no light history; read /api/sessions instead.")
+
+    if bot is not None:
+        _known_bot(bot)
+
+    wanted = list(dict.fromkeys(int(part) for part in ids.split(",") if part.strip().isdigit()))[:HISTORY_IDS]
+
+    if not wanted:
+        return {"session_id": session_id, "messages": []}
+
+    def read(db):
+        resolved = hermes._resolve_session_id(db, session_id)
+
+        if not resolved:
+            return None
+
+        resolved = db.resolve_resume_session_id(resolved)
+        lineage = db._resume_lineage_ids(resolved) if callable(getattr(db, "_resume_lineage_ids", None)) else [resolved]
+        rows = db._read_all(
+            f"SELECT * FROM messages WHERE id IN ({','.join('?' * len(wanted))}) AND session_id IN ({','.join('?' * len(lineage))}) ORDER BY id ASC",
+            [*wanted, *lineage],
+        )
+
+        return resolved, [db._row_to_message_dict(row, warn_context="hermes-bot-mobile history rows", summary_flag=True) for row in rows]
+
+    found = await asyncio.to_thread(hermes._with_db, bot, read, read_only=True)
+
+    if found is None:
+        raise HTTPException(status_code=404, detail="No such chat on this server.")
+
+    resolved, rows = found
+    project = hermes._project_for_display
+    options = {"home": hermes._history_profile_home(bot)}
+
+    if "inline_images" in inspect.signature(project).parameters:
+        options["inline_images"] = False
+
+    history = _history()
+
+    return {"session_id": resolved, "messages": [history.full_row(row) for row in project(rows, **options)]}
+
+
+if _hermes_history() is not None:
+    FEATURES.append("history")
 
 
 # The watch starts with the dashboard, not with the app's first read: a prompt opened before the app connects is pushed

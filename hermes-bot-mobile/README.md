@@ -241,6 +241,25 @@ Taildrop is off for this server.
 **The log.** The last 20 sends are kept in `taildrop.json`: when, the device, the file's name, its size, the outcome
 and the CLI's message. Never a path or the contents.
 
+## Light history (0.3.0)
+
+Opening a chat, the app used to read Hermes's own `/api/sessions/{id}/messages`: whole stored rows, two hundred at a time.
+In a busy bot's chat most of that is never drawn. Measured on a real server, the newest 200 rows of one chat came to
+1.2 MB, of which about 50 KB was words a person reads; the rest was the prompt as the model saw it (`api_content`),
+the provider's encrypted reasoning, and full tool output. The app shows a run of tool steps as one line and opens a
+step's output only when tapped.
+
+`GET /history/{session}` hands back the person's newest turns (20 by default) through Hermes's own reader (same
+profile, same compaction rules, stored pictures as `[image]`), each row cut down by `history.py`: never-drawn fields
+dropped; a tool result's small fields kept (exit code, error, status, the picture or file it made) and a long text kept
+by its end (the line the app shows is the output's last one); an edit's result whole, as Hermes's own compact history
+keeps it, since its diff is drawn; long tool arguments cut to their start. A cut row carries `omitted`, and
+`GET /history/{session}/rows?ids=` hands it back whole: the app fetches it when the step comes near the screen, so a
+tap shows it at once. On real chats this took a page from 1.35 MB to 81 KB, and from 896 KB to 200 KB for a bot whose
+turns are mostly tools. Pages count turns, not rows, and `offset` is the rows the app already holds, as Hermes's
+paging does. Where Hermes lacks the readers this relies on (before 0.22), `features` does not list `history` and the
+app reads Hermes's route as before.
+
 ## Hermes 0.22
 
 Works on Hermes 0.21 and 0.22. On 0.22 the assignee's gateway runs a kanban card in a managed worker process of its own,
@@ -260,6 +279,8 @@ Under `/api/plugins/hermes-bot-mobile/`, behind the dashboard's sign-in:
 | `POST /devices`, `DELETE /devices/{id}` | register or remove a phone |
 | `PUT /settings` | each bot on or `off` (`all` and `needs_you` both mean on) |
 | `PUT /presence` | what the phone has on screen (no pushes for it) |
+| `GET /history/{session}?bot=&turns=&offset=` | a chat's newest `turns` (20) of the person's turns, light; `pagination.has_older` (0.3.0, Hermes 0.22+) |
+| `GET /history/{session}/rows?bot=&ids=` | those rows of that chat whole (up to 100), never another chat's |
 | `POST /test` | send a test push |
 | `GET /needs-you` | `{live, version, requests: [{id, method, session_id, session_key, profile, title, created_at, params}], kanban: [{id, profile, chat, task: {id, title, board, created_by}, command, description, allow_session, allow_permanent, created_at}]}`, oldest first; pushed as `plugin.hermes-bot-mobile.needs_you.changed` when it changes |
 | `POST /kanban-approvals/{id}` | `{choice: once\|session\|always\|deny}`: answers a kanban worker's approval, `{answered: true, id, choice}`; 404 when it no longer waits, 409 answered already, 400 a choice it doesn't offer |
