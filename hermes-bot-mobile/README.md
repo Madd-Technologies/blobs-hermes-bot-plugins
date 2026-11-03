@@ -166,6 +166,23 @@ gateway, call that. With `include_gateway`, this plugin restarts both, in this o
    time, would stop it partway, possibly after the gateway was asked to stop and before it was started again. A gateway
    restart that fails still lets the dashboard restart; `last.gateway` says how it went.
 
+**The gateway's own work (0.3.1, Hermes 0.22+).** Hermes 0.22's `hermes gateway restart` refuses, exit 1 and nothing
+stopped, while the gateway runs anything of its own: a turn on a chat platform, a routine, a background delegation. A
+script feed that runs every 15 minutes is enough to hit it, and before 0.3.1 this plugin only kept the exit code, so the
+dashboard restarted and the request read `done` while the gateway never did. Now:
+
+- `now` passes Hermes's `interrupt`, as Hermes's own restart button (`POST /api/gateway/restart`) does: the gateway still
+  drains its turns, and what cannot wait (a routine, a background delegation) is cut off, which is what "Restart now"
+  says in the app.
+- `idle` waits for the gateway's work too (Hermes's own list, the one its refusal names), and when a routine starts
+  between that look and the restart, waits again and retries (15 s at the earliest: Hermes folds restarts asked within
+  10 s into the last one), until `idle_timeout_s`.
+- `last.gateway.outcome` is `restarted`, `refused` (it had work), `not_restarted` (it answered 0 but is still the same
+  process), `still_running` (after 30 minutes) or `failed`, with `exit_code`, `pid_before`, `pid_after`, `interrupt` and
+  `detail`: what `hermes gateway restart` printed (from Hermes's `logs/gateway-restart.log`, this restart's part only).
+  When it did not restart, the request's own `detail` says so in one line, while its `outcome` still follows the
+  dashboard. `GET /restart`'s `gateway.busy` lists the gateway's work right now (None when this Hermes cannot say).
+
 Chaining both commands in the transient unit instead would lose all of step 1: a unit started by `systemd-run --user`
 gets the user's systemd environment, not the dashboard's (Hermes's home, its Python, the profile), and Hermes's own
 restart button would not see it to join it.
