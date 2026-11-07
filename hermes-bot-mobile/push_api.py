@@ -23,13 +23,15 @@ except ImportError:  # the tests import the modules flat
     import notify  # type: ignore[no-redef]
     from store import DeviceStore  # type: ignore[no-redef]
 
-#: `call`: a phone errand waits for the person's OK, or finished. `call_question`: a call on the line waits ~60 s for an answer.
+#: `call`: a phone errand waits for the person's OK, or finished. `call_question`: a call on the line waits on an answer or an
+#: OK (a minute, three while the person listens in).
 KINDS = ("call", "call_question")
-VERSION = 1
+#: 2: `actions`, a notification's buttons.
+VERSION = 2
 
 
 def send(kind: str, *, profile: str, bot: str, body: str, key: str, url: Optional[str] = None, folder: Optional[Path] = None,
-         post=None) -> dict:
+         post=None, actions: Optional[list] = None) -> dict:
     """Push to every registered phone now (not in the background: the caller is a service with its own threads) and say how it
     went: `{"sent": n, "devices": n}`, or `{"sent": 0, "skipped": "off"}`. Never raises for a device that fails; raises
     `ValueError` for a kind it doesn't send."""
@@ -42,7 +44,7 @@ def send(kind: str, *, profile: str, bot: str, body: str, key: str, url: Optiona
         return {"sent": 0, "skipped": "off"}
 
     payload = notify.build(kind, profile=profile, bot=bot, body=notify.lines(kind, detail=notify.redact(body)), key=key,
-                           url=url or notify.INBOX)
+                           url=url or notify.INBOX, actions=actions)
     deliveries = notify.Pusher(store, post=post, background=False).deliver(kind, payload)
 
     return {"sent": sum(1 for delivery in deliveries if delivery.ok), "devices": len(deliveries)}

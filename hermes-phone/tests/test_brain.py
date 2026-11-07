@@ -27,6 +27,7 @@ class Harness:
         self.t = [1000.0]
         self.grok, self.twilio, self.saved, self.hung, self.asked = [], [], [], [], []
         self.answer = answer
+        self.gate = None  # a future the person's answer waits on, when a test wants the wait itself
 
         async def grok(event):
             self.grok.append(event)
@@ -37,8 +38,13 @@ class Harness:
         async def hang_up():
             self.hung.append(True)
 
-        async def ask(question):
-            self.asked.append(question)
+        self.asks = []
+
+        async def ask(ask):
+            self.asks.append(ask)
+            self.asked.append(ask["question"])
+            if self.gate is not None:
+                await self.gate
             return self.answer
 
         ports = M.Ports(grok=grok, twilio=twilio, hang_up=hang_up, ask_owner=ask, save=self.saved.append, clock=lambda: self.t[0])
@@ -327,6 +333,9 @@ class Tools(unittest.TestCase):
         self.assertEqual(h.outputs()[-1], {"answer": "Yes, the lid is exposed."})
         update = [e for e in h.grok if e["type"] == "session.update" and "instructions" in e["session"]][-1]
         self.assertIn("Alex answered during this call, to “Is the lid exposed?”: Yes, the lid is exposed.", update["session"]["instructions"])
+        self.assertNotEqual(h.types()[-1], "response.create")  # not over the scripted "let me check" still to play
+        h.grok_event("response.created", response={"id": "r-check"})
+        h.grok_event("response.done")
         self.assertEqual(h.types()[-1], "response.create")
 
     def test_no_answer_and_the_limit(self):
@@ -346,7 +355,7 @@ class Tools(unittest.TestCase):
         for question in ("What card should we put on file?", "Is $450 all right?", "Should I give them the gate PIN?"):
             h.tool("ask_owner", question=question)
             self.assertIsNone(h.outputs()[-1]["answer"])
-            self.assertIn("never gives that", h.outputs()[-1]["note"])
+            self.assertIn("never gives or agrees to that", h.outputs()[-1]["note"])
         self.assertEqual(h.asked, [])
         h.tool("ask_owner", question="Is the lid exposed?")  # the blocked ones didn't use up the three questions
         h.run(asyncio.sleep(0))
@@ -635,3 +644,264 @@ class Screeners(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def settle(h, times=3):
+    for _ in range(times):
+        h.run(asyncio.sleep(0))
+
+
+def stop_tasks(h):
+    for task in h.brain._tasks:
+        task.cancel()
+    settle(h)
+
+
+class Asking(unittest.TestCase):
+    """ask_owner: a question with choices or an approval, the wait ("checking"), and what the voice gets back."""
+
+    def waiting(self, answer=None, **args):
+        h = Harness(answer=answer)
+        h.gate = LOOP.create_future()
+        h.opened()
+        h.tool("ask_owner", **({"kind": "question", "question": "Is the lid exposed?"} | args))
+        settle(h)
+        self.addCleanup(stop_tasks, h)
+        return h
+
+    def test_a_question_with_choices_goes_to_the_person_and_the_voice_waits_quietly(self):
+        h = self.waiting(answer={"choice": "Yes"}, choices=["Yes", "No", "Not sure", "Maybe later"])
+        self.assertEqual(h.asks[-1], {"kind": "question", "question": "Is the lid exposed?", "choices": ["Yes", "No", "Not sure"]})
+        self.assertEqual(h.forced()[-1], "One moment, let me check with Alex.")
+        self.assertIsNone(h.vad()[-1])
+        self.assertEqual(h.brain.mode, "checking")
+        self.assertNotIn("clear", [e["event"] for e in h.twilio])  # what the voice said first plays out
+        # The scripted line plays even though the voice is held.
+        h.grok_event("response.created", response={"id": "r-check"})
+        h.grok_event("response.output_audio.delta", delta="AAAA")
+        self.assertEqual(h.sent_media()[-1]["media"]["payload"], "AAAA")
+        h.grok_event("response.done")
+        h.gate.set_result(None)
+        settle(h)
+        self.assertEqual(h.outputs()[-1], {"answer": "Yes"})
+        self.assertEqual(h.brain.mode, "voice")
+        self.assertEqual(h.vad()[-1], {"type": "server_vad"})
+        self.assertEqual(h.types()[-1], "response.create")
+
+    def test_the_checking_line_waits_for_the_voice_to_finish(self):
+        h = Harness()
+        h.gate = LOOP.create_future()
+        self.addCleanup(stop_tasks, h)
+        h.opened()
+        h.grok_event("response.created", response={"id": "r1"})
+        h.tool("ask_owner", kind="question", question="Is the lid exposed?")
+        self.assertEqual(h.forced()[-1:], [P_OPENING := h.forced()[-1]])  # nothing new yet
+        self.assertNotIn("One moment, let me check with Alex.", h.forced())
+        self.assertNotIn("response.cancel", h.types())
+        h.grok_event("response.done")
+        self.assertEqual(h.forced()[-1], "One moment, let me check with Alex.")
+        self.assertTrue(P_OPENING)
+
+    def test_they_hear_still_checking_when_they_speak_and_their_words_reach_the_voice_after(self):
+        h = self.waiting(answer="Yes, it is.")
+        h.grok_event("response.created", response={"id": "r-check"})
+        h.grok_event("response.done")
+        h.t[0] += M.REASSURE_GAP_S + 1
+        h.grok_event("conversation.item.input_audio_transcription.completed", item_id="i9", transcript="Hello? Are you still there?")
+        self.assertEqual(h.forced()[-1], "Still checking with Alex, thanks for waiting.")
+        self.assertEqual(h.brain.mode, "checking")  # a live-sounding voice doesn't end the wait
+        h.grok_event("response.created", response={"id": "r-re"})
+        h.grok_event("response.done")
+        h.gate.set_result(None)
+        settle(h)
+        said = [e for e in h.grok if e["type"] == "conversation.item.create" and e["item"]["type"] == "message"]
+        self.assertIn("Are you still there?", said[-1]["item"]["content"][0]["text"])
+        self.assertEqual(h.types()[-1], "response.create")
+
+    def test_a_long_quiet_wait_gets_a_still_checking_and_never_hits_the_hold_cap(self):
+        h = Harness(hold_minutes=1)
+        h.gate = LOOP.create_future()
+        self.addCleanup(stop_tasks, h)
+        h.opened()
+        h.tool("ask_owner", kind="question", question="Is the lid exposed?")
+        h.grok_event("response.created", response={"id": "r-check"})
+        h.grok_event("response.done")
+        h.t[0] += M.REASSURE_EVERY_S + 1
+        h.run(h.brain.tick())
+        self.assertEqual(h.forced()[-1], "Still checking with Alex, thanks for waiting.")
+        h.grok_event("response.created", response={"id": "r-re"})
+        h.grok_event("response.done")
+        h.t[0] += 90
+        h.run(h.brain.tick())
+        self.assertNotEqual(h.brain.state.phase, "ended")
+
+    def test_an_approval_widens_what_the_voice_may_agree_to(self):
+        h = self.waiting(answer={"approved": True}, kind="approval", question="Pump-out next Tuesday instead of a quote only")
+        h.gate.set_result(None)
+        settle(h)
+        self.assertEqual(h.asks[-1]["kind"], "approval")
+        self.assertTrue(h.outputs()[-1]["approved"])
+        update = [e for e in h.grok if e["type"] == "session.update" and "instructions" in e["session"]][-1]
+        self.assertIn("Alex approved during this call", update["session"]["instructions"])
+        self.assertIn("- Pump-out next Tuesday instead of a quote only", update["session"]["instructions"])
+        h.tool("record_outcome", status="booked", earliest="Tuesday")
+        self.assertEqual(h.saved[-1]["outcome"]["status"], "booked")  # a quote call may book what was approved
+
+    def test_a_denied_approval_changes_nothing(self):
+        h = self.waiting(answer={"approved": False}, kind="approval", question="8 pm instead of 7 pm")
+        h.gate.set_result(None)
+        settle(h)
+        self.assertFalse(h.outputs()[-1]["approved"])
+        self.assertIn("Decline it politely", h.outputs()[-1]["note"])
+        self.assertEqual(h.brain.state.answers, [])
+        h.tool("record_outcome", status="booked")
+        self.assertEqual(h.saved[-1]["outcome"]["status"], "call_back")
+
+    def test_money_is_never_put_to_the_person(self):
+        for args in ({"kind": "approval", "question": "A $50 deposit to hold the slot"}, {"kind": "question", "question": "Which time?", "choices": ["Pay by card", "Later"]}):
+            with self.subTest(args=args):
+                h = Harness()
+                h.opened()
+                h.tool("ask_owner", **args)
+                self.assertEqual(h.asked, [])
+                self.assertIn("never gives or agrees to that", h.outputs()[-1]["note"])
+
+    def test_one_question_at_a_time(self):
+        h = self.waiting()
+        h.tool("ask_owner", call_id="q2", kind="question", question="And the gate?")
+        self.assertEqual(len(h.asked), 1)
+        self.assertIn("One question at a time", h.outputs()[-1]["note"])
+
+    def test_nothing_back_in_time(self):
+        h = self.waiting(answer=None)
+        h.gate.set_result(None)
+        settle(h)
+        self.assertIsNone(h.outputs()[-1]["answer"])
+        self.assertIn("get back to them", h.outputs()[-1]["note"])
+        self.assertEqual(h.brain.mode, "voice")
+
+    def test_asked_not_to_call_while_checking(self):
+        h = self.waiting()
+        h.grok_event("response.created", response={"id": "r-check"})
+        h.grok_event("response.done")
+        h.grok_event("conversation.item.input_audio_transcription.completed", item_id="i9", transcript="Actually, stop calling us. Bye?")
+        settle(h)
+        self.assertEqual(h.brain.mode, "voice")
+        self.assertTrue(h.brain.state.no_more_calls)
+        self.assertTrue(h.gate.cancelled() or not h.brain._asks)
+
+
+class Joining(unittest.TestCase):
+    """The person takes the call from the app, and hands it back."""
+
+    def joined(self, **kw):
+        h = Harness(**kw)
+        h.opened()
+        self.assertTrue(h.run(h.brain.take_over()))
+        self.assertEqual(h.forced()[-1], "One moment, I'll put Alex on the line.")
+        self.assertEqual(h.brain.mode, "handover")
+        h.grok_event("response.created", response={"id": "r-hand"})
+        h.grok_event("response.output_audio.delta", delta="BBBB")
+        self.assertEqual(h.sent_media()[-1]["media"]["payload"], "BBBB")
+        h.grok_event("response.done")
+        self.assertEqual(h.twilio[-1], {"event": "mark", "streamSid": "MZ1", "mark": {"name": "handover"}})
+        h.twilio_event("mark", mark={"name": "handover"})
+        self.assertEqual(h.brain.mode, "owner")
+        return h
+
+    def test_take_over_then_hand_back(self):
+        h = self.joined()
+        self.assertIsNone(h.vad()[-1])
+        # The voice says nothing while the person has the line.
+        before = len(h.sent_media())
+        h.grok_event("response.created", response={"id": "r-x"})
+        h.grok_event("response.output_audio.delta", delta="CCCC")
+        self.assertEqual(len(h.sent_media()), before)
+        h.grok_event("response.done")
+        # What is said is kept for the voice, never judged as hold.
+        h.grok_event("conversation.item.input_audio_transcription.completed", item_id="i5", transcript="Sure, we can do Thursday at nine. Does that work?")
+        self.assertEqual(h.brain.mode, "owner")
+        self.assertEqual(h.brain.state.transcript[-1]["who"], "line")
+        h.t[0] += M.HOLD_CLEAR_S + 1
+        h.run(h.brain.tick())
+        self.assertTrue(h.run(h.brain.hand_back("Thursday at nine is booked; just get the arrival window.")))
+        self.assertEqual(h.brain.mode, "voice")
+        update = [e for e in h.grok if e["type"] == "session.update" and "instructions" in e["session"]][-1]["session"]["instructions"]
+        self.assertIn("Alex spoke with them directly during this call and noted: Thursday at nine is booked", update)
+        self.assertIn("has handed the call back to you", update)
+        said = [e for e in h.grok if e["type"] == "conversation.item.create" and e["item"]["type"] == "message"][-1]["item"]["content"][0]["text"]
+        self.assertTrue(said.startswith("[What was said on the line while Alex was on it"))
+        self.assertIn("Thursday at nine", said)
+        self.assertEqual(h.vad()[-1], {"type": "server_vad"})
+        self.assertEqual(h.types()[-1], "response.create")
+
+    def test_the_hold_cap_never_ends_the_persons_turn(self):
+        h = self.joined(hold_minutes=1)
+        h.t[0] += 120
+        h.run(h.brain.tick())
+        self.assertNotEqual(h.brain.state.phase, "ended")
+
+    def test_joining_settles_a_pending_question(self):
+        h = Harness()
+        h.gate = LOOP.create_future()
+        h.opened()
+        h.tool("ask_owner", kind="question", question="Is the lid exposed?")
+        settle(h)
+        self.assertTrue(h.run(h.brain.take_over()))
+        settle(h)
+        self.assertIn("joined the call", h.outputs()[-1]["note"])
+        self.assertFalse(h.brain.state.asking)
+        self.assertEqual(h.forced()[-1], "One moment, I'll put Alex on the line.")
+
+    def test_a_reply_cut_off_by_joining_finishes_before_the_line(self):
+        h = Harness()
+        h.opened()
+        h.grok_event("response.created", response={"id": "r5"})
+        self.assertTrue(h.run(h.brain.take_over()))
+        self.assertIn("response.cancel", h.types())
+        self.assertNotIn("One moment, I'll put Alex on the line.", h.forced())
+        h.grok_event("response.done")  # the cancelled reply's
+        self.assertEqual(h.forced()[-1], "One moment, I'll put Alex on the line.")
+        self.assertFalse(any(e.get("mark", {}).get("name") == "handover" for e in h.twilio))
+        h.grok_event("response.created", response={"id": "r6"})
+        h.grok_event("response.done")
+        self.assertEqual(h.twilio[-1]["mark"]["name"], "handover")
+
+    def test_on_hold_music_the_person_just_takes_the_line(self):
+        h = Harness()
+        h.opened()
+        h.tool("stay_silent", reason="hold")
+        self.assertTrue(h.run(h.brain.take_over()))
+        self.assertEqual(h.brain.mode, "owner")
+        self.assertNotIn("One moment, I'll put Alex on the line.", h.forced())
+
+    def test_not_while_a_screener_or_voicemail_or_the_goodbye(self):
+        h = Harness()
+        h.start()
+        self.assertFalse(h.run(h.brain.take_over()))  # still greeting
+        h = Harness()
+        h.opened()
+        h.run(h.brain.on_amd("machine_end_beep"))
+        self.assertFalse(h.run(h.brain.take_over()))
+        h = Harness()
+        h.opened()
+        h.tool("end_call")
+        self.assertFalse(h.run(h.brain.take_over()))
+
+    def test_a_dropped_line_hands_back_with_an_apology(self):
+        h = self.joined()
+        self.assertTrue(h.run(h.brain.hand_back(dropped=True)))
+        update = [e for e in h.grok if e["type"] == "session.update" and "instructions" in e["session"]][-1]["session"]["instructions"]
+        self.assertIn("The line to Alex dropped", update)
+
+    def test_a_note_that_cant_go_on_a_call_is_held_back(self):
+        h = self.joined()
+        h.run(h.brain.hand_back("Put the $80 on my card 4111 1111 1111 1111"))
+        self.assertNotIn("4111", json.dumps(h.grok))
+        self.assertNotIn("$80", json.dumps(h.grok))
+        self.assertEqual([a for a in h.brain.state.answers if a.get("kind") == "note"], [])
+
+    def test_hand_back_only_when_the_person_has_the_line(self):
+        h = Harness()
+        h.opened()
+        self.assertFalse(h.run(h.brain.hand_back("hi")))

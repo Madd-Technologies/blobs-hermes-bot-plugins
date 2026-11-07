@@ -1,7 +1,7 @@
 """G.711 μ-law at 8 kHz, the audio Twilio Media Streams and Grok's `audio/pcmu` both speak, and keypad tones made from it.
 
-Pure Python because `audioop` is gone from Python 3.13+. Only small things are encoded here (keypad tones, silence); the
-call's own audio passes between Twilio and Grok untouched.
+Pure Python because `audioop` is gone from Python 3.13+. Only small things are encoded here (keypad tones, silence) and
+mixed (two sides of a call into one, for the person listening in, and their microphone into what the voice hears).
 """
 
 from __future__ import annotations
@@ -47,6 +47,24 @@ def encode(samples: Iterable[float]) -> bytes:
 
 def decode(data: bytes) -> List[int]:
     return [decode_sample(b) for b in data]
+
+
+_DECODED = [decode_sample(b) for b in range(256)]
+_ENCODED: List[int] = []
+
+
+def mix(a: bytes, b: bytes) -> bytes:
+    """Two μ-law streams as one, summed and clipped; the shorter one is padded with silence."""
+    if not b:
+        return bytes(a)
+    if not a:
+        return bytes(b)
+    if not _ENCODED:
+        _ENCODED.extend(encode_sample(s) for s in range(-32768, 32768))
+    n = max(len(a), len(b))
+    a, b = a.ljust(n, bytes([SILENCE])), b.ljust(n, bytes([SILENCE]))
+
+    return bytes(_ENCODED[max(-32768, min(32767, _DECODED[x] + _DECODED[y])) + 32768] for x, y in zip(a, b))
 
 
 def frames(data: bytes) -> List[str]:
