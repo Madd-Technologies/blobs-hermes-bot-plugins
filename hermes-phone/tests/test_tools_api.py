@@ -111,8 +111,56 @@ class Routes(unittest.TestCase):
     def errand(self, **extra):
         return json.loads(self.root.tools().phone_call(septic(**extra)))["errand_id"]
 
+    def live_question(self, **question):
+        errand_id = self.errand()
+        self.client.post(f"{BASE}/errands/{errand_id}/approve", json={})
+        call_id = self.root.store.errand(errand_id)["calls"][0]["id"]
+        record = {"id": "a1", "kind": "question", "text": "Which day?", "choices": ["Monday", "Tuesday"], "asked": 1.0, "deadline": 61.0,
+                  "answer": None, "approved": None, **question}
+        self.root.store.update_call(errand_id, call_id, lambda c: c.update(status="live", question=record))
+        return errand_id, call_id
+
+    def test_answer_with_a_choice_or_an_approval(self):
+        errand_id, call_id = self.live_question()
+        url = f"{BASE}/errands/{errand_id}/calls/{call_id}/answer"
+        self.assertEqual(self.client.post(url, json={"choice": "Friday"}).status_code, 400)
+        self.assertEqual(self.client.post(url, json={"approved": True}).status_code, 400)  # a question, not an approval
+        self.assertEqual(self.client.post(url, json={"choice": "Monday", "ask": "old"}).status_code, 409)  # a stale button
+        out = self.client.post(url, json={"choice": "Monday", "ask": "a1"}).json()
+        self.assertEqual(out["calls"][0]["question"]["answer"], "Monday")
+        self.assertEqual(self.client.post(url, json={"text": "Tuesday"}).status_code, 409)  # already answered
+
+        errand_id, call_id = self.live_question(kind="approval", text="8 pm instead of 7 pm", choices=[])
+        url = f"{BASE}/errands/{errand_id}/calls/{call_id}/answer"
+        out = self.client.post(url, json={"approved": False, "ask": "a1"}).json()
+        self.assertIs(out["calls"][0]["question"]["approved"], False)
+        self.assertEqual(self.client.post(url, json={"approved": True}).status_code, 409)
+
+    def test_a_listen_ticket_only_for_a_call_on_the_line(self):
+        errand_id = self.errand()
+        self.client.post(f"{BASE}/errands/{errand_id}/approve", json={})
+        call_id = self.root.store.errand(errand_id)["calls"][0]["id"]
+        url = f"{BASE}/errands/{errand_id}/calls/{call_id}/listen"
+        self.assertEqual(self.client.post(url).json()["detail"]["reason"], "not_live")
+        self.root.store.update_call(errand_id, call_id, lambda c: c.update(status="live"))
+        self.assertEqual(self.client.post(url).json()["detail"]["reason"], "no_service")  # no public address, no heartbeat
+        self.root.store.update_settings({"public_url": "https://node.example.ts.net:8443"})
+        self.root.store.beat({"pid": 1})
+        out = self.client.post(url).json()
+        self.assertEqual(out["url"], "wss://node.example.ts.net:8443/app/listen")
+        self.assertEqual(out["protocols"][0], "hermes-phone.listen")
+        ticket = out["protocols"][1].removeprefix("ticket.")
+        self.assertGreater(len(ticket), 40)
+        stored = self.root.store.errand(errand_id)["calls"][0]["listen"]
+        self.assertNotIn(ticket, json.dumps(stored))  # only its hash is kept
+        self.assertNotIn("listen", self.client.get(f"{BASE}/errands/{errand_id}").json()["calls"][0])
+        self.assertEqual(self.root.store.use_listen(ticket)[1]["id"], call_id)
+        self.assertIsNone(self.root.store.use_listen(ticket))  # once
+        self.assertEqual(self.client.post(f"{BASE}/errands/{errand_id}/calls/c_nope/listen").status_code, 404)
+
     def test_status(self):
         out = self.client.get(f"{BASE}/status").json()
+        self.assertEqual(out["features"], ["ask_kinds", "listen"])
         self.assertEqual((out["line"], out["public_url"], out["stage"], out["service"]["running"]),
                          ({"set": True, "number": "…23"}, False, "test", False))
 

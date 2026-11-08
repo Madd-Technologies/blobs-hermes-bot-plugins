@@ -5,6 +5,7 @@ import asyncio
 import base64
 import json
 import signal
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -353,6 +354,185 @@ class Stream(Base):
         self.assertIsNotNone(self.store.known_number("+12025550101", 14))
         self.assertTrue(self.grok.closed)
 
+
+
+class Asking(Base):
+    """The service's half of ask_owner: the record the app answers, the push with buttons, the wait and its log."""
+
+    def asking(self, ask, during=None, token=""):
+        errand = self.approved()
+        call = errand["calls"][0]
+        self.store.update_call(errand["id"], call["id"], lambda c: c.update(status="live"))
+
+        async def run():
+            task = asyncio.ensure_future(self.service._ask(errand, call, ask, token))
+            await asyncio.sleep(0.05)
+            if during:
+                await during(errand, call, task)
+            try:
+                return await task
+            except asyncio.CancelledError:
+                return "cancelled"
+
+        return errand, call, asyncio.run(run())
+
+    def answer_with(self, change):
+        async def during(errand, call, task):
+            self.store.update_call(errand["id"], call["id"], lambda c: c["question"].update(change))
+        return during
+
+    def test_an_approval_is_pushed_with_allow_deny_and_join(self):
+        errand, call, reply = self.asking({"kind": "approval", "question": "8 pm instead of 7 pm", "choices": []}, self.answer_with({"approved": True}))
+        self.assertEqual(reply, {"approved": True})
+        kind, push = self.deliver.pushes[-1]
+        self.assertEqual(kind, "call_question")
+        self.assertEqual(push["body"], "Pine Valley Septic: 8 pm instead of 7 pm. Allow it?")
+        self.assertEqual(push["url"], f"hermesbot://bot/default/errand-call?errand={errand['id']}&call={call['id']}")
+        self.assertEqual([a["title"] for a in push["actions"]], ["Allow", "Deny", "Join the call"])
+        self.assertIn("&approved=1", push["actions"][0]["url"])
+        self.assertNotIn("+1202", json.dumps(push))  # no number in a push
+        after = self.store.errand(errand["id"])["calls"][0]
+        self.assertIsNone(after["question"])
+        self.assertEqual(after["answers"][-1] | {"asked": 0}, {"question": "8 pm instead of 7 pm", "answer": "Allowed", "asked": 0, "kind": "approval", "how": "allowed"})
+        self.assertEqual([e["what"] for e in after["log"]], ["asked_ok", "allowed"])
+
+    def test_a_question_with_choices(self):
+        errand, call, reply = self.asking({"kind": "question", "question": "Which day?", "choices": ["Monday", "Tuesday", "Friday"]},
+                                          self.answer_with({"answer": "Tuesday"}))
+        self.assertEqual(reply, {"text": "Tuesday"})
+        titles = [a["title"] for a in self.deliver.pushes[-1][1]["actions"]]
+        self.assertEqual(titles, ["Monday", "Tuesday", "Join the call"])
+
+    def test_no_answer_in_time(self):
+        async def late(errand, call, task):
+            self.t[0] += V.QUESTION_WAIT_S + 1
+        errand, call, reply = self.asking({"kind": "question", "question": "Which day?", "choices": []}, late)
+        self.assertIsNone(reply)
+        self.assertEqual(self.store.errand(errand["id"])["calls"][0]["answers"][-1]["how"], "no_answer")
+
+    def test_joining_settles_it(self):
+        async def join(errand, call, task):
+            task.cancel()
+            await asyncio.sleep(0)
+        errand, call, reply = self.asking({"kind": "question", "question": "Which day?", "choices": []}, join)
+        self.assertEqual(reply, "cancelled")
+        after = self.store.errand(errand["id"])["calls"][0]
+        self.assertEqual((after["answers"][-1]["how"], after["log"][-1]["what"], after["question"]), ("joined", "joined", None))
+
+    def test_a_listener_waits_longer(self):
+        self.service.live["tok"] = V.Live("e", "c", brain=None, twilio=None, grok=None, listener=object())
+        async def check(errand, call, task):
+            question = self.store.errand(errand["id"])["calls"][0]["question"]
+            self.assertEqual(question["deadline"] - question["asked"], V.LISTEN_WAIT_S)
+            task.cancel()
+            await asyncio.sleep(0)
+        self.asking({"kind": "question", "question": "Which day?", "choices": []}, check, token="tok")
+
+
+class Listening(Stream):
+    """The person listens in, takes the call over and hands it back, over the call service's own socket."""
+
+    def opened(self, ws):
+        ws.send_json({"event": "connected"})
+        ws.send_json({"event": "start", "start": {"streamSid": "MZ1", "callSid": "CA1"}})
+        for payload, seconds in ((LOUD, 0.5), (QUIET, 0.9)):
+            for _ in range(int(seconds / 0.02)):
+                self.t[0] += 0.02
+                ws.send_json({"event": "media", "media": {"payload": payload}})
+        self.assertEqual(ws.receive_json()["media"]["payload"], "OPENING")
+        self.assertEqual(ws.receive_json()["mark"]["name"], "opening")
+        ws.send_json({"event": "mark", "mark": {"name": "opening"}})
+
+    def until(self, ws, kind, key="type"):
+        while True:
+            message = ws.receive_json()
+            if message.get(key) == kind:
+                return message
+
+    def test_a_ticket_opens_one_socket_once(self):
+        errand, call = self.live_call()
+        ticket = self.store.mint_listen(errand["id"], call["id"])
+        with self.assertRaises(WebSocketDisconnect):
+            with self.client.websocket_connect("/app/listen", subprotocols=["hermes-phone.listen", "ticket.wrong"]) as ws:
+                ws.receive_json()
+        self.t[0] += S.LISTEN_TICKET_S + 1
+        with self.assertRaises(WebSocketDisconnect):
+            with self.client.websocket_connect("/app/listen", subprotocols=["hermes-phone.listen", f"ticket.{ticket}"]) as ws:
+                ws.receive_json()
+        with self.assertRaises(WebSocketDisconnect):  # expired, and now spent too
+            with self.client.websocket_connect("/app/listen", subprotocols=["hermes-phone.listen", f"ticket.{ticket}"]) as ws:
+                ws.receive_json()
+
+    def test_listen_take_over_and_hand_back(self):
+        errand, call = self.live_call()
+        token = call["token"]
+        with self.client.websocket_connect(f"/twilio/stream/{token}", headers={"x-twilio-signature": T.signature("tok", self.url(token), {})}) as tw:
+            self.opened(tw)
+            ticket = self.store.mint_listen(errand["id"], call["id"])
+            with self.client.websocket_connect("/app/listen", subprotocols=["hermes-phone.listen", f"ticket.{ticket}"]) as app:
+                hello = app.receive_json()
+                self.assertEqual((hello["type"], hello["mode"]), ("hello", "voice"))
+                for _ in range(5):
+                    tw.send_json({"event": "media", "media": {"payload": QUIET}})
+                heard = self.until(app, "audio")
+                self.assertEqual(len(base64.b64decode(heard["pcmu"])), 800)
+
+                app.send_json({"type": "take_over"})
+                self.assertEqual(tw.receive_json(), {"event": "clear", "streamSid": "MZ1"})
+                self.assertEqual(tw.receive_json()["media"]["payload"], "OPENING")  # the fake voice says its scripted line
+                self.assertEqual(tw.receive_json()["mark"]["name"], "handover")
+                tw.send_json({"event": "mark", "mark": {"name": "handover"}})
+                while self.until(app, "state")["mode"] != "owner":
+                    pass
+
+                app.send_json({"type": "audio", "pcmu": LOUD})
+                self.assertEqual(self.until(tw, "media", key="event")["media"]["payload"], LOUD)
+
+                app.send_json({"type": "hand_back", "note": "Thursday works."})
+                self.assertEqual(self.until(app, "state")["mode"], "voice")
+                app.send_json({"type": "leave"})
+            tw.send_json({"event": "stop"})
+            try:
+                tw.receive_json()
+            except WebSocketDisconnect:
+                pass
+
+        forced = [e["item"]["content"][0]["text"] for e in self.grok.sent if e["type"] == "conversation.item.create" and e["item"]["type"] == "force_message"]
+        self.assertIn("One moment, I'll put Alex on the line.", forced)
+        instructions = [e["session"]["instructions"] for e in self.grok.sent if e["type"] == "session.update" and "instructions" in e["session"]]
+        self.assertIn("noted: Thursday works.", instructions[-1])
+        log = [e["what"] for e in self.store.errand(errand["id"])["calls"][0]["log"]]
+        self.assertEqual(log, ["listen", "took_over", "handed_back", "stopped_listening"])
+
+    def test_a_dropped_listener_hands_the_call_back(self):
+        errand, call = self.live_call()
+        token = call["token"]
+        with self.client.websocket_connect(f"/twilio/stream/{token}", headers={"x-twilio-signature": T.signature("tok", self.url(token), {})}) as tw:
+            self.opened(tw)
+            ticket = self.store.mint_listen(errand["id"], call["id"])
+            with self.client.websocket_connect("/app/listen", subprotocols=["hermes-phone.listen", f"ticket.{ticket}"]) as app:
+                app.receive_json()
+                app.send_json({"type": "take_over"})
+                while tw.receive_json().get("event") != "mark":
+                    pass
+                tw.send_json({"event": "mark", "mark": {"name": "handover"}})
+                while self.until(app, "state")["mode"] != "owner":
+                    pass
+            self.t[0] += V.DROP_HAND_BACK_S + 1
+            for _ in range(40):  # the ticks notice
+                if any(e["what"] == "dropped" for e in self.store.errand(errand["id"])["calls"][0]["log"]):
+                    break
+                tw.send_json({"event": "media", "media": {"payload": QUIET}})
+                time.sleep(0.05)
+            tw.send_json({"event": "stop"})
+            try:
+                tw.receive_json()
+            except WebSocketDisconnect:
+                pass
+        log = [e["what"] for e in self.store.errand(errand["id"])["calls"][0]["log"]]
+        self.assertIn("dropped", log)
+        instructions = [e["session"]["instructions"] for e in self.grok.sent if e["type"] == "session.update" and "instructions" in e["session"]]
+        self.assertIn("The line to Alex dropped", instructions[-1])
 
 if __name__ == "__main__":
     unittest.main()

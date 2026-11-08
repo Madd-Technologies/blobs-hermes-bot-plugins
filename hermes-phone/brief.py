@@ -287,14 +287,24 @@ def for_call(brief: Dict[str, Any], call: Dict[str, Any], name: str, answers: Li
     else:
         lines.append(f"- Callback number: none to give: say {name} will call them back")
 
+    approved = []
     for answer in answers or []:
-        lines.append(f"- {name} answered during this call, to “{answer['question']}”: {answer['answer']}")
+        kind = answer.get("kind") or "question"
+        if kind == "approval":
+            approved.append(answer["question"])
+        elif kind == "note":
+            lines.append(f"- {name} spoke with them directly during this call and noted: {answer['answer']}")
+        else:
+            lines.append(f"- {name} answered during this call, to “{answer['question']}”: {answer['answer']}")
 
     if brief["questions"]:
         lines.append("Questions to ask:")
         lines.extend(f"- {q}" for q in brief["questions"])
     if brief["mode"] == "book" and brief["accept"]:
         lines.append(f"You may agree to: {brief['accept']}")
+    if approved:
+        lines.append(f"{name} approved during this call (you may agree to exactly these, nothing more, and never to money):")
+        lines.extend(f"- {a}" for a in approved)
 
     lines.append("Write down: " + "; ".join(f"{f['label']} ({f['key']})" for f in brief["record"]))
 

@@ -3,7 +3,7 @@
 Mounted by Hermes under `/api/plugins/hermes-phone/`, behind the dashboard's own sign-in. Install the plugin in the default
 profile; one copy serves the app for every bot.
 
-  GET  /status                                  {version, service, line, public_url, stage}
+  GET  /status                                  {version, service, line, public_url, stage, features}
   GET  /settings                                the settings; never-share values are never sent back, only a hint
   PUT  /settings                                any settings, plus never_share_add [{label, value}] / never_share_remove [label]
   GET  /errands?open=true                       newest first
@@ -12,7 +12,10 @@ profile; one copy serves the app for every bot.
   POST /errands/{id}/decline
   POST /errands/{id}/cancel                     stop the calls not made yet, hang up a live one
   POST /errands/{id}/calls/{call_id}/hangup
-  POST /errands/{id}/calls/{call_id}/answer     {text}: the answer to a question a call is waiting on (screened like a brief)
+  POST /errands/{id}/calls/{call_id}/answer     {text} | {choice} | {approved}, with the question's {ask} id: the answer to
+                                                a question or approval a call is waiting on (screened like a brief)
+  POST /errands/{id}/calls/{call_id}/listen     {url, protocols, expires}: a single-use ticket to listen in on a live call
+                                                and take it over, on the call service's own socket
 
 Approving is the only way an errand gets dialed: every flagged fact must be ticked, the edited brief is checked again, and
 the approval records a hash of the brief so the call service refuses one that changed afterwards. Refusals are
@@ -87,6 +90,8 @@ def _hint(value: str) -> str:
 
 
 router = APIRouter()
+#: What this version offers the app: questions with choices and approvals on a call, and listening in / taking over.
+FEATURES = ("ask_kinds", "listen")
 
 
 @router.get("/status")
@@ -96,7 +101,7 @@ def status() -> Dict[str, Any]:
     service = store.service()
     return {"version": _version(), "service": {"running": service["running"], "live": service.get("live", 0)},
             "line": {"set": bool(line), "number": _core("dialing").masked(line["number"]) if line else ""},
-            "public_url": bool(settings["public_url"]), "stage": settings["stage"]}
+            "public_url": bool(settings["public_url"]), "stage": settings["stage"], "features": list(FEATURES)}
 
 
 def _settings_view(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -143,7 +148,7 @@ def get_errand(errand_id: str):
     if not errand:
         return _refuse(404, "unknown", "No such errand.")
     errand = dict(errand)
-    errand["calls"] = [{k: v for k, v in c.items() if k not in ("token", "sid")} for c in errand["calls"]]
+    errand["calls"] = [{k: v for k, v in c.items() if k not in ("token", "sid", "listen")} for c in errand["calls"]]
     return errand
 
 
@@ -232,25 +237,66 @@ def hangup(errand_id: str, call_id: str):
 
 @router.post("/errands/{errand_id}/calls/{call_id}/answer")
 def answer(errand_id: str, call_id: str, body: Dict[str, Any] = Body(...)):
+    """One answer to what a call is waiting on: typed text, one of its choices, or Allow / Deny for an approval. With `ask`
+    (a push button's link carries it), only that question is answered."""
     text = " ".join(str(body.get("text") or "").split())[:300]
-    if not text:
+    choice = " ".join(str(body.get("choice") or "").split())
+    approved = body.get("approved") if isinstance(body.get("approved"), bool) else None
+    if not text and not choice and approved is None:
         return _refuse(400, "invalid", "The answer is empty.")
     store = _store()
-    problems = _core("brief").screen(text, store.settings()["never_share"])
+    problems = _core("brief").screen(text, store.settings()["never_share"]) if text else []
     if problems:
         return _refuse(400, "not_on_a_call", " ".join(problems))
-    state = {}
+    state: Dict[str, Any] = {}
 
     def give(c: Dict[str, Any]) -> None:
-        if not c.get("question") or c["question"].get("answer"):
+        question = c.get("question")
+        if (not question or question.get("answer") or isinstance(question.get("approved"), bool)
+                or (body.get("ask") and body.get("ask") != question.get("id"))):
             state["late"] = True
             return
-        c["question"]["answer"] = text
+        kind = question.get("kind") or "question"
+        if approved is not None:
+            if kind != "approval":
+                state["wrong"] = "This is a question, not an approval."
+                return
+            question["approved"] = approved
+        elif choice:
+            if choice not in (question.get("choices") or []):
+                state["wrong"] = "That isn't one of the choices."
+                return
+            question["answer"] = choice
+        else:
+            question["answer"] = text
 
     try:
         store.update_call(errand_id, call_id, give)
     except KeyError:
         return _refuse(404, "unknown", "No such call.")
     if state.get("late"):
-        return _refuse(409, "late", "The call isn't waiting on a question any more.")
+        return _refuse(409, "late", "The call isn't waiting on that any more.")
+    if state.get("wrong"):
+        return _refuse(400, "invalid", state["wrong"])
     return get_errand(errand_id)
+
+
+@router.post("/errands/{errand_id}/calls/{call_id}/listen")
+def listen(errand_id: str, call_id: str):
+    """A ticket to listen in on a call that is being made, used once within 30 s on the call service's socket. Only this
+    signed-in route mints one: the voice, the bot and the other party never can."""
+    S = _core("store")
+    store = _store()
+    errand = store.errand(errand_id)
+    call = next((c for c in (errand or {}).get("calls", []) if c["id"] == call_id), None)
+    if not errand or not call:
+        return _refuse(404, "unknown", "No such call.")
+    if call["status"] not in S.CALL_ACTIVE:
+        return _refuse(409, "not_live", "The call isn't on the line.")
+    public = str(store.settings().get("public_url") or "").rstrip("/")
+    if not public or not store.service()["running"]:
+        return _refuse(409, "no_service", "The call service isn't reachable.")
+    ticket = store.mint_listen(errand_id, call_id)
+    log.info("hermes-phone: call %s: a listen ticket was minted", call_id)
+    return {"url": "wss://" + public.removeprefix("https://") + "/app/listen", "protocols": ["hermes-phone.listen", f"ticket.{ticket}"],
+            "expires": S.LISTEN_TICKET_S}

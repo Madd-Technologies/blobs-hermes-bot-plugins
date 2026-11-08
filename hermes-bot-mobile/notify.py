@@ -35,7 +35,7 @@ CHANNELS = {"approval": "Approvals", "question": "Questions", "blocked": "Questi
 
 #: Seconds a push may wait in the push service if the phone is off, and how it is flagged for delivery.
 #: A phone call's question waits about a minute on the line, so its push is worthless after that.
-TTL_SECONDS = {"approval": 300, "question": 3600, "blocked": 3600, "routine": 3600, "reply": 3600, "test": 60, "call": 3600, "call_question": 60}
+TTL_SECONDS = {"approval": 300, "question": 3600, "blocked": 3600, "routine": 3600, "reply": 3600, "test": 60, "call": 3600, "call_question": 180}
 URGENCY = {"approval": "high", "question": "high", "blocked": "high", "routine": "normal", "reply": "normal", "test": "high", "call": "high",
            "call_question": "high"}
 
@@ -138,18 +138,31 @@ def link(profile: str, *, chat: str = "", room: str = "", page: str = "") -> str
     return f"{base}?chat={quote(chat, safe='')}" if chat else base
 
 
-def build(kind: str, *, profile: str, bot: str, body: str, key: str, url: str | None = None) -> dict:
+#: A notification's buttons: Android shows three at most.
+MAX_ACTIONS = 3
+ACTION_TITLE_LIMIT = 30
+
+
+def build(kind: str, *, profile: str, bot: str, body: str, key: str, url: str | None = None,
+          actions: list[dict] | None = None) -> dict:
     """The payload the phone's push library renders by itself while the app is closed.
 
     `url` opens the app where the push is about (the notification is the first tap; Allow / Deny is the second).
+    `actions` are buttons ({title, url}), each opening one of the app's own links; the app (1.x with the push library patched
+    to draw them) shows up to three, an older one ignores them.
     """
-    return {
+    payload = {
         "id": notification_id(kind, profile, key),
         "title": tidy(bot, TITLE_LIMIT) or "Hermes",
         "body": body if kind == "reply" else tidy(body),
         "type": CHANNELS[kind],
         "url": url or link(profile),
     }
+    buttons = [{"title": tidy(str(a.get("title") or ""), ACTION_TITLE_LIMIT), "url": str(a.get("url") or "")} for a in actions or []
+               if isinstance(a, dict) and str(a.get("url") or "").startswith("hermesbot://") and str(a.get("title") or "").strip()]
+    if buttons:
+        payload["actions"] = buttons[:MAX_ACTIONS]
+    return payload
 
 
 def lines(kind: str, *, detail: str = "", failed: bool = False) -> str:

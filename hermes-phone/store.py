@@ -56,6 +56,9 @@ ERRAND_OPEN = ("pending", "approved", "running")
 #: Errands Twilio can be calling back about: approved ones (and cancelled ones while a hang-up is under way).
 DIALABLE = ("approved", "running", "cancelled")
 CALL_ACTIVE = ("dialing", "ringing", "live")
+#: A ticket to listen in on a call: used once, within this many seconds of being minted.
+LISTEN_TICKET_S = 30
+LOG_MAX = 100
 
 
 class SettingsError(ValueError):
@@ -70,6 +73,12 @@ def default_root() -> Path:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(6)}"
+
+
+def _ticket_hash(ticket: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(ticket.encode()).hexdigest()
 
 
 def brief_hash(brief: Dict[str, Any]) -> str:
@@ -196,7 +205,7 @@ class Store:
             "calls": [{"id": new_id("c"), "index": i, "name": c["name"], "number": c["number"], "status": "waiting",
                        "token": secrets.token_urlsafe(24), "sid": "", "answered_by": "", "started": None, "ended": None,
                        "outcome": None, "transcript": [], "question": None, "answers": [], "hangup": False, "error": "",
-                       "hold": False} for i, c in enumerate(brief["calls"])],
+                       "hold": False, "mode": "", "log": []} for i, c in enumerate(brief["calls"])],
         }
         self._errand_file(errand["id"]).update(lambda _: errand)
         return errand
@@ -245,6 +254,35 @@ class Store:
         for errand in self.errands(status=DIALABLE, limit=200):
             for call in errand["calls"]:
                 if secrets.compare_digest(str(call.get("token") or ""), token):
+                    return errand, call
+        return None
+
+    # listening in, and the call's log
+
+    def log_call(self, errand_id: str, call_id: str, what: str, text: str = "") -> None:
+        """One line of what happened on a call that the person (or the voice, asking them) did: asked, answered, allowed,
+        denied, no answer, listened, took over, handed back."""
+        entry = {"t": self.clock(), "what": what, **({"text": text[:300]} if text else {})}
+        self.update_call(errand_id, call_id, lambda c: c.update(log=((c.get("log") or []) + [entry])[-LOG_MAX:]))
+
+    def mint_listen(self, errand_id: str, call_id: str) -> str:
+        """A single-use ticket to listen in on one call. Only its hash is kept; a newer ticket replaces an unused one."""
+        ticket = secrets.token_urlsafe(32)
+        self.update_call(errand_id, call_id, lambda c: c.update(listen={"hash": _ticket_hash(ticket), "expires": self.clock() + LISTEN_TICKET_S}))
+        return ticket
+
+    def use_listen(self, ticket: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """The errand and call a listen ticket was minted for, once, while it is fresh; None otherwise."""
+        if not ticket or len(ticket) > 100:
+            return None
+        wanted = _ticket_hash(ticket)
+        for errand in self.errands(status=DIALABLE, limit=200):
+            for call in errand["calls"]:
+                held = call.get("listen") or {}
+                if held.get("hash") and secrets.compare_digest(str(held["hash"]), wanted):
+                    self.update_call(errand["id"], call["id"], lambda c: c.update(listen=None))
+                    if held.get("expires", 0) < self.clock() or call["status"] not in CALL_ACTIVE:
+                        return None
                     return errand, call
         return None
 

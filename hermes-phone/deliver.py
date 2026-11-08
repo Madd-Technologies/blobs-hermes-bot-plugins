@@ -20,7 +20,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("hermes-phone")
 
@@ -48,11 +48,16 @@ def _push_api(root: Path):
     return sys.modules[module_name]
 
 
-def push(root: Path, kind: str, *, profile: str, bot: str, body: str, key: str, url: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def push(root: Path, kind: str, *, profile: str, bot: str, body: str, key: str, url: Optional[str] = None,
+         actions: Optional[List[Dict[str, str]]] = None) -> Optional[Dict[str, Any]]:
+    """`actions`: the notification's buttons ({title, url}), from hermes-bot-mobile 0.3.2's push_api (version 2); an older one
+    gets the push without them."""
     try:
         api = _push_api(root)
         if api is None:
             return None
+        if actions and getattr(api, "VERSION", 1) >= 2:
+            return api.send(kind, profile=profile, bot=bot, body=body, key=key, url=url, actions=actions)
         return api.send(kind, profile=profile, bot=bot, body=body, key=key, url=url)
     except Exception as error:
         log.warning("hermes-phone: push failed (%s)", type(error).__name__)

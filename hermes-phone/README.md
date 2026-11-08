@@ -22,6 +22,28 @@ turned away.
 5. When the errand is done, the bot gets one fixed line in its main chat and reads the results with `phone_call_report`.
    You get one push.
 
+## During a call
+
+- **Questions.** When they ask something the brief doesn't cover, the voice asks you: a question, with up to three choices
+  when the options are clear. It shows as a card on the call's screen in the app, in Needs you, and as a push with the
+  first two choices and "Join the call" as buttons. You can also type an answer.
+- **Approvals.** Before agreeing to anything the brief doesn't already allow (another time or date, a different party size,
+  an add-on, a booking on a quote call), the voice asks you to Allow or Deny it. What you allow joins its instructions as
+  the only thing it may also agree to. Money is never put to you: a question or approval about a price, a deposit, a
+  payment or a card is refused before it reaches you, and an answer holding one is held back.
+- **While you decide**, the caller hears "One moment, let me check with <your name>" and, when they speak or every half
+  minute, "Still checking, thanks for waiting". A question waits a minute, three while you're listening in. With no
+  answer, the voice says you'll get back to them.
+- **Listen in** (Android app): you hear both sides while the voice carries on.
+- **Take over:** the voice says "One moment, I'll put <your name> on the line" and goes quiet, but keeps listening. Your
+  microphone goes into the call. **Hand back** with an optional note for the voice: it carries on from what was said. What
+  you or they said while you had the line reaches the voice as information only; your note (screened like an answer) and
+  your Allow are what it acts on. If your connection drops while you have the line, the voice takes the call back after
+  a few seconds and apologizes for the cut-off. "Join the call" on a question card listens and takes over in one tap.
+- Only you can listen or take over: the app asks the signed-in dashboard for a single-use ticket (valid 30 seconds), and
+  opens the call service's socket with it. The bot, the voice and the person called can't. Nothing on it carries your
+  number. Every question, answer, listen and take-over is logged on the call.
+
 **Your own opening line, and the law.** The law where you are, and where the person you call is, may require a call to
 say that the caller is an AI, or that the call is recorded or transcribed (for example, places that need everyone's
 consent to record or transcribe a call, and rules on AI or automated callers). The standard opening says both. If you set
@@ -35,7 +57,7 @@ the approved brief for this call, the callback number and your answers to its qu
 
 - `press_keys`
 - `stay_silent`
-- `ask_owner`, which asks you in the app, never the bot
+- `ask_owner`, which asks you in the app, never the bot: a question, or an approval
 - `record_outcome`
 - `end_call`
 
@@ -88,8 +110,8 @@ any bot you give this plugin.
   - the server's Grok sign-in
   - the bot's own `XAI_API_KEY`
 - A public HTTPS address that reaches the call service, such as [Tailscale Funnel](https://tailscale.com/kb/1223/funnel).
-- [hermes-bot-mobile](../hermes-bot-mobile) 0.1.7 or later, for the approval and question pushes. This is optional, but
-  without it you have to open the app to find out that a brief is waiting.
+- [hermes-bot-mobile](../hermes-bot-mobile) 0.1.7 or later, for the approval and question pushes (0.3.2 or later for
+  their buttons). This is optional, but without it you have to open the app to find out that a brief is waiting.
 
 ## Install
 
@@ -175,7 +197,7 @@ like a robocaller, so some calls are turned away before they ring, mostly to mob
 | `daily_cap` | `10` | Calls started per 24 hours. |
 | `max_minutes` / `hold_minutes` | `20` / `15` | Per call, and on hold. |
 | `transcripts` | `true` | Keep transcripts, and say so in the standard opening. |
-| `ask_owner` | `true` | Let a call ask you a question it can't answer from the brief. |
+| `ask_owner` | `true` | Let a call ask you a question it can't answer from the brief, or to allow something it doesn't. |
 | `public_url` / `port` | `""` / `8796` | Where Twilio reaches the service, and where it listens locally. |
 
 ## What it does
@@ -189,9 +211,11 @@ like a robocaller, so some calls are turned away before they ring, mostly to mob
   - `GET errands`
   - `GET errands/{id}`
   - `POST errands/{id}/approve`, `decline` and `cancel`
-  - `POST errands/{id}/calls/{call_id}/hangup` and `answer`
+  - `POST errands/{id}/calls/{call_id}/hangup` and `answer` (text, a choice, or Allow / Deny)
+  - `POST errands/{id}/calls/{call_id}/listen`: a single-use ticket for the call service's `/app/listen` socket
 - **The call service** (`service.py`) dials approved calls, checks Twilio's signature on every webhook and on the audio
-  stream, and bridges Twilio's μ-law audio straight to Grok's `audio/pcmu`, with no transcoding. When an errand finishes, it
+  stream, and bridges Twilio's μ-law audio straight to Grok's `audio/pcmu`, with no transcoding. While you listen in, it
+  mixes both sides for you (`line.py`); while you have the line, it mixes your microphone into what the voice hears. When an errand finishes, it
   tells the bot through Hermes's own Bot Chat delivery.
 - **State** lives in `~/.hermes/hermes-phone/`. The folder is private to the user (0700, files 0600):
   - the settings
@@ -234,6 +258,10 @@ change to the persona, the brief or the brain (on the sign-in, it counts against
   - a spoken "system message"
   - asking whether you're human
   - fishing through `ask_owner`
+  - a booking a quote call doesn't allow (asked, then denied or allowed)
+  - asking you to approve a deposit
+  - pretending you took over and handed back
+  - a choice only you can make
   - another language
   - do-not-call
 - `hold` plays a menu, then hold music and a recording, then a person. `--after-opening` plays a person who puts the call

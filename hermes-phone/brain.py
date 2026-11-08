@@ -17,9 +17,17 @@ Transport-free (the service and the tests give it ports), so every rule here is 
   answered with the opening line, after its tone if it mentions one, and then the call waits as on hold: a person picking
   up gets the opening again, a voicemail greeting gets the scripted message, and after a minute of neither the call ends.
 - **Tools:** keypad tones go straight to Twilio as audio. The outcome is checked and saved. `ask_owner` waits on the
-  person, never the bot, and the answer joins the instructions. `end_call` hangs up once the goodbye has played and they
-  have had a moment for theirs.
-- **Limits:** a warning a minute before the call's cap, then a hang-up. A hold cap. At most 3 questions to the person.
+  person, never the bot: a question (with choices) or an approval of something outside the brief. Its answer joins the
+  instructions. `end_call` hangs up once the goodbye has played and they have had a moment for theirs.
+- **Checking** (while `ask_owner` waits): a scripted "one moment, let me check" and the voice goes quiet as on hold, but
+  nothing they say ends it: they hear a scripted "still checking" when they speak, or now and then, and their words reach the
+  voice as text once the answer is in.
+- **The person on the line** (`take_over` / `hand_back`, from the app only): a scripted "I'll put them on", then the voice
+  is silent as on hold while it keeps listening (the service mixes the person's microphone into its input). Handing back
+  gives the voice what was said, as information, and the person's note, which comes from them like an answer. A pending
+  question is settled by the person joining.
+- **Limits:** a warning a minute before the call's cap, then a hang-up. A hold cap (not while checking or while the person
+  has the line). At most 3 questions to the person.
 """
 
 from __future__ import annotations
@@ -66,6 +74,10 @@ SAVE_EVERY_S = 15.0
 SCREEN_PAUSE_S = 1.5  # a screener that has stopped talking, with no tone to wait for
 SCREEN_TONE_S = 4.0  # the longest wait for a screener's tone (answering-machine detection usually reports it first)
 SCREEN_WAIT_S = 60.0  # after answering a screener, how long to wait for the person or their voicemail
+#: While checking with the person: "still checking" at most this often when they speak, and after this long of quiet.
+REASSURE_GAP_S = 8.0
+REASSURE_EVERY_S = 25.0
+CHOICE_LIMIT = 40
 
 _RECORDING = re.compile(
     r"(your call is important|please (continue to )?hold|(please )?stay on the line|next available|estimated (wait|hold)|"
@@ -139,7 +151,8 @@ class Ports:
     grok: Callable[[Dict[str, Any]], Awaitable[None]]
     twilio: Callable[[Dict[str, Any]], Awaitable[None]]
     hang_up: Callable[[], Awaitable[None]]
-    ask_owner: Callable[[str], Awaitable[Optional[str]]]
+    #: Asks the person: {"kind", "question", "choices"} -> {"text"} / {"choice"} / {"approved"} (or a bare string), or None.
+    ask_owner: Callable[[Dict[str, Any]], Awaitable[Any]]
     save: Callable[[Dict[str, Any]], None]
     clock: Callable[[], float]
     log: Callable[[str], None] = lambda message: None
@@ -173,6 +186,7 @@ class State:
     opening_sent: float = 0.0
     vad: bool = False
     hold: bool = False
+    hold_reason: str = ""  # hold (music, a recording), checking (waiting on the person), owner (the person has the line)
     hold_since: float = 0.0
     last_clear: float = 0.0
     hold_pending: str = ""  # the burst of words heard on hold since the last pause
@@ -187,7 +201,15 @@ class State:
     force_pending: Optional[str] = None  # "opening" or "voicemail" while a scripted line plays
     keys_at: float = -1e9
     questions: int = 0
-    answers: List[Dict[str, str]] = field(default_factory=list)
+    answers: List[Dict[str, str]] = field(default_factory=list)  # {kind?, question, answer}: answers, approvals, notes
+    asking: bool = False
+    check_after_response: bool = False
+    reassured_at: float = 0.0
+    meanwhile: List[str] = field(default_factory=list)  # words heard while checking or while the person had the line
+    handover: bool = False  # "I'll put them on" is playing
+    say_handover: bool = False  # ...once the reply it cut off is done (its response.done would pass for the line's)
+    handover_at: float = 0.0
+    owner_since: float = 0.0
     warned: bool = False
     end_after_response: bool = False
     goodbye_check: bool = False  # asked not to be called again: end after a goodbye, giving it one if it hadn't spoken yet
@@ -215,6 +237,16 @@ class Brain:
         self.ports = ports
         self.state = State()
         self._tasks: List[asyncio.Task] = []
+        self._asks: Dict[str, asyncio.Task] = {}
+
+    @property
+    def mode(self) -> str:
+        """Who is talking for this side of the call, for the app: voice, hold, checking, handover or owner."""
+        if self.state.handover:
+            return "handover"
+        if self.state.hold:
+            return self.state.hold_reason or "hold"
+        return "voice"
 
     # helpers
 
@@ -262,7 +294,7 @@ class Brain:
 
     def _save(self, **extra: Any) -> None:
         self.state.saved_at = self._now()
-        update = {"hold": self.state.hold, "outcome": self.state.outcome, **extra}
+        update = {"hold": self.state.hold and self.state.hold_reason == "hold", "mode": self.mode, "outcome": self.state.outcome, **extra}
         if self.setup.transcripts:
             update["transcript"] = list(self.state.transcript)
         self.ports.save(update)
@@ -294,6 +326,8 @@ class Brain:
                 await self._opening_played()
             elif message.get("mark", {}).get("name") == "screen":
                 await self._screen_answered()
+            elif message.get("mark", {}).get("name") == "handover":
+                await self._owner_on()
         elif event == "stop":
             await self.finish(hung_up_by_them=True)
 
@@ -366,7 +400,7 @@ class Brain:
             if self.state.response_gated:
                 await self._grok({"type": "response.cancel"})
         elif kind in ("response.output_audio.delta", "response.audio.delta"):
-            if self.state.response_gated or self.state.hold or self.state.phase in ("greeting", "ending", "ended"):
+            if self.state.response_gated or (self.state.hold and not self.state.force_pending) or self.state.phase in ("greeting", "ending", "ended"):
                 return
             if self.state.phase == "screening" and not self.state.force_pending:
                 return  # only the scripted answer goes to a screener
@@ -383,7 +417,7 @@ class Brain:
             self.state.response_spoke = True
             await self._twilio("media", media={"payload": event.get("delta", "")})
         elif kind in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
-            if not self.state.response_gated and not self.state.hold:
+            if not self.state.response_gated and (not self.state.hold or self.state.force_pending):
                 self._note("assistant", str(event.get("transcript") or ""))
         elif kind == "response.done":
             await self._response_done()
@@ -416,13 +450,22 @@ class Brain:
         elif forced == "voicemail":
             self.state.outcome = self.state.outcome or {"status": "no_answer", "notes": "Left a voicemail."}
             await self._goodbye()
+        elif forced == "handover":
+            await self._twilio("mark", mark={"name": "handover"})
+        elif forced in ("checking", "reassure"):
+            pass
+        elif self.state.say_handover:
+            self.state.say_handover = False
+            await self._say("handover", P.handover_line(self.setup.name))
+        elif self.state.check_after_response and not forced:
+            await self._start_checking()
         elif self.state.end_after_response:
             if self.state.goodbye_check and not spoke and self.state.phase == "live":
                 self.state.goodbye_check = False
                 await self._grok({"type": "response.create"})  # it hadn't said a word: one reply to apologize, then the end
             else:
                 await self._goodbye()
-        elif self.state.respond_after and not self.state.hold and self.state.phase == "live":
+        if self.state.respond_after and not self.state.hold and not self.state.handover and not self.state.end_after_response and self.state.phase == "live":
             self.state.respond_after = False
             await self._grok({"type": "response.create"})
 
@@ -507,6 +550,9 @@ class Brain:
 
     async def _hold_judge(self, words: Optional[List[str]] = None) -> None:
         burst, self.state.hold_pending = self.state.hold_pending, ""
+        if self.state.hold_reason in ("checking", "owner"):
+            await self._meanwhile(burst)
+            return
         if self.state.screening == "waiting" and VOICEMAIL.search(burst):
             self.state.screening = "done"
             self._note("them", burst)
@@ -544,20 +590,21 @@ class Brain:
 
     # hold
 
-    async def _enter_hold(self) -> None:
+    async def _enter_hold(self, reason: str = "hold") -> None:
         if self.state.hold:
             return
-        self.state.hold = True
+        self.state.hold, self.state.hold_reason = True, reason
         self.state.hold_since = self.state.last_clear = self._now()
         self.state.heard_on_hold, self.state.hold_pending, self.state.hold_heard_at = [], "", self._now()
         await self._vad(False)
         if self.state.response:
             await self._grok({"type": "response.cancel"})
-        await self._twilio("clear")
+        if reason != "checking":  # what the voice said before checking is let finish playing
+            await self._twilio("clear")
         self._save()
 
     async def _leave_hold(self, words: str = "") -> None:
-        self.state.hold = False
+        self.state.hold, self.state.hold_reason = False, ""
         self.state.phase = "live"
         self._save()
         if not self.state.opening_said:
@@ -608,18 +655,7 @@ class Brain:
                 return
             await self._output(call_id, {"ok": True}, respond=not self.state.end_after_response)
         elif name == "ask_owner":
-            question = re.sub(r"\s+", " ", str(args.get("question") or "")).strip()[:200]
-            if not self.setup.ask_owner or not question or self.state.questions >= MAX_QUESTIONS:
-                await self._output(call_id, {"answer": None, "note": f"Not available. Say {self.setup.name} will get back to them."}, respond=True)
-                return
-            if B.screen(question, self.setup.never_share):
-                # A caller angling for a card, a code or a price through the person: never asked.
-                self._note("assistant", f"[not asked: {question}]")
-                await self._output(call_id, {"answer": None, "note": f"{self.setup.name} never gives that on a call. Say {self.setup.name} will get back to them."},
-                                   respond=True)
-                return
-            self.state.questions += 1
-            self._tasks.append(asyncio.ensure_future(self._ask(call_id, question)))
+            await self._ask_owner(call_id, args)
         elif name == "end_call":
             self.state.end_after_response = True
             await self._output(call_id, {"ok": True})
@@ -628,26 +664,207 @@ class Brain:
         else:
             await self._output(call_id, {"ok": False, "error": "unknown tool"})
 
-    async def _ask(self, call_id: str, question: str) -> None:
-        self._note("assistant", f"[asked {self.setup.name}: {question}]")
+    # asking the person
+
+    async def _ask_owner(self, call_id: str, args: Dict[str, Any]) -> None:
+        kind = args.get("kind") if args.get("kind") in P.ASK_KINDS else "question"
+        question = re.sub(r"\s+", " ", str(args.get("question") or "")).strip()[:200]
+        raw_choices = args.get("choices") if isinstance(args.get("choices"), list) else []
+        choices = [c for c in (re.sub(r"\s+", " ", str(c)).strip()[:CHOICE_LIMIT] for c in raw_choices) if c][:P.MAX_CHOICES]
+        if kind == "approval":
+            choices = []
+        name = self.setup.name
+        if not self.setup.ask_owner or not question or self.state.questions >= MAX_QUESTIONS or self.mode in ("handover", "owner"):
+            await self._output(call_id, {"answer": None, "note": f"Not available. Say {name} will get back to them."}, respond=True)
+            return
+        if self.state.asking:
+            await self._output(call_id, {"answer": None, "note": "One question at a time: wait for the answer to the first."})
+            return
+        if B.screen(" ".join([question] + choices), self.setup.never_share):
+            # A caller angling for a card, a code or a price through the person: never asked, never approved.
+            self._note("assistant", f"[not asked: {question}]")
+            await self._output(call_id, {"answer": None, "note": f"{name} never gives or agrees to that on a call. Say {name} will get back to them."},
+                               respond=True)
+            return
+        self.state.questions += 1
+        self.state.asking = True
+        task = asyncio.ensure_future(self._ask(call_id, kind, question, choices))
+        self._asks[call_id] = task
+        self._tasks.append(task)
+        await self._vad(False)  # no reply to them while it waits; the line that says so is scripted
+        if self.state.response:
+            self.state.check_after_response = True
+        else:
+            await self._start_checking()
+
+    async def _start_checking(self) -> None:
+        self.state.check_after_response = False
+        if not self.state.asking or self.state.hold or self.state.handover or self.state.phase != "live":
+            return
+        await self._enter_hold("checking")
+        self.state.meanwhile = []
+        self.state.reassured_at = self._now()
+        await self._say("checking", P.checking_line(self.setup.name))
+
+    async def _reassure(self) -> None:
+        self.state.reassured_at = self._now()
+        await self._say("reassure", P.still_checking_line(self.setup.name))
+
+    async def _meanwhile(self, burst: str) -> None:
+        """Words heard while checking with the person, or while the person has the line: kept for the voice, never judged as
+        hold. A person waiting on us who speaks hears that we are still checking."""
+        if not burst:
+            return
+        self.state.meanwhile.append(burst)
+        self._note("line" if self.state.hold_reason == "owner" else "them", burst)
+        if self.state.hold_reason != "checking":
+            return
+        if DO_NOT_CALL.search(burst):
+            for call_id in list(self._asks):
+                self._settle_ask(call_id, {"answer": None, "note": "They asked not to be called again."})
+            await self._back_to_voice()
+            await self._asked_not_to_call()
+            return
+        if not self.state.force_pending and not self.state.response and self._now() - self.state.reassured_at >= REASSURE_GAP_S:
+            await self._reassure()
+
+    def _settle_ask(self, call_id: str, output: Dict[str, Any]) -> None:
+        """Ends a pending question without its answer (the person joined, or the call moved on)."""
+        task = self._asks.pop(call_id, None)
+        if task is not None:
+            task.cancel()
+        self.state.asking = bool(self._asks)
+        self._tasks.append(asyncio.ensure_future(self._grok({"type": "conversation.item.create", "item": {
+            "type": "function_call_output", "call_id": call_id, "output": json.dumps(output)}})))
+
+    @staticmethod
+    def _reply(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, str):
+            return {"text": raw}
+        return raw if isinstance(raw, dict) else {}
+
+    async def _ask(self, call_id: str, kind: str, question: str, choices: List[str]) -> None:
+        name = self.setup.name
+        self._note("assistant", f"[asked {name} to allow: {question}]" if kind == "approval" else f"[asked {name}: {question}]")
         try:
-            answer = await self.ports.ask_owner(question)
+            raw = await self.ports.ask_owner({"kind": kind, "question": question, "choices": choices})
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            answer = None
+            raw = None
+        self._asks.pop(call_id, None)
+        self.state.asking = bool(self._asks)
         if self.state.phase in ("ending", "ended"):
             return
-        if answer:
-            answer = re.sub(r"\s+", " ", answer).strip()[:300]
+        reply = self._reply(raw)
+        answer = re.sub(r"\s+", " ", str(reply.get("text") or reply.get("choice") or "")).strip()[:300] or None
         if answer and B.screen(answer, self.setup.never_share):
-            self._note("assistant", f"[{self.setup.name}'s answer held back: it can't go on a call]")
+            self._note("assistant", f"[{name}'s answer held back: it can't go on a call]")
             answer = None
-        if answer:
+        approved = reply.get("approved") if kind == "approval" and isinstance(reply.get("approved"), bool) else None
+
+        if approved is True:
+            self.state.answers.append({"kind": "approval", "question": question, "answer": "allowed"})
+            self._note("assistant", f"[{name} allowed: {question}]")
+            output = {"approved": True, "note": "Allowed: you may agree to exactly this, nothing more."}
+        elif approved is False:
+            self._note("assistant", f"[{name} said no to: {question}]")
+            output = {"approved": False, "note": f"Not allowed. Decline it politely; say {name} will get back to them if they need more."}
+        elif answer:
             self.state.answers.append({"question": question, "answer": answer})
-            self._note("assistant", f"[{self.setup.name} answered: {answer}]")
-            await self._instructions()
-            await self._output(call_id, {"answer": answer}, respond=True)
+            self._note("assistant", f"[{name} answered: {answer}]")
+            output = {"answer": answer}
         else:
-            await self._output(call_id, {"answer": None, "note": f"No answer. Say {self.setup.name} will get back to them about it."}, respond=True)
+            output = {"answer": None, "note": f"No answer. Say {name} will get back to them about it."}
+        if approved is True or (approved is None and answer):
+            await self._instructions()
+        await self._output(call_id, output)
+        if self.state.hold_reason == "checking":
+            await self._back_to_voice()
+        elif not self.state.hold and not self.state.handover:
+            await self._respond()
+        # With the person on the line, the voice speaks again when they hand the call back.
+
+    async def _respond(self) -> None:
+        if self.state.response or self.state.force_pending:  # one response at a time; a scripted line is one
+            self.state.respond_after = True
+        else:
+            await self._grok({"type": "response.create"})
+
+    async def _back_to_voice(self, context: str = "") -> None:
+        """Out of checking or the person's turn: a fresh buffer, voice detection on, what was said meanwhile as their words,
+        and a reply."""
+        words = " ".join(self.state.meanwhile + ([self.state.hold_pending] if self.state.hold_pending else [])).strip()
+        self.state.meanwhile, self.state.hold_pending = [], ""
+        self.state.hold, self.state.hold_reason, self.state.phase = False, "", "live"
+        self._save()
+        await self._grok({"type": "input_audio_buffer.clear"})
+        await self._vad(True)
+        if words:
+            await self._grok({"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": f"{context}{words}" if context else words}]}})
+        await self._respond()
+
+    # the person on the line (from the app, through the service)
+
+    async def take_over(self) -> bool:
+        """The person joins: the voice says it is putting them on (unless nobody is listening: hold music, a menu), then goes
+        silent and keeps listening. A pending question is settled by their joining. False when the call can't be joined now."""
+        if (self.state.phase != "live" or self.state.handover or self.state.hold_reason == "owner" or self.state.machine
+                or self.state.screening in ("listening", "answering", "waiting") or self.state.end_after_response):
+            return False
+        for call_id in list(self._asks):
+            self._settle_ask(call_id, {"answer": None, "note": f"{self.setup.name} joined the call to answer this directly."})
+        self.state.check_after_response = False
+        quiet = self.state.hold_reason == "hold" or not self.state.opening_said
+        await self._vad(False)
+        busy = bool(self.state.response)
+        if busy:
+            self.state.response_gated = True
+            await self._grok({"type": "response.cancel"})
+        await self._twilio("clear")
+        self._note("assistant", f"[{self.setup.name} joined the call]")
+        if quiet:
+            await self._owner_on(force=True)
+        else:
+            self.state.hold = False
+            self.state.handover, self.state.handover_at = True, self._now()
+            if busy:
+                self.state.say_handover = True
+            else:
+                await self._say("handover", P.handover_line(self.setup.name))
+        self._save()
+        return True
+
+    async def _owner_on(self, force: bool = False) -> None:
+        if not self.state.handover and not force:
+            return
+        self.state.handover = self.state.say_handover = False
+        self.state.hold = False  # entered afresh, as the person's turn
+        await self._enter_hold("owner")
+        self.state.owner_since = self._now()
+        self.state.meanwhile = []
+
+    async def hand_back(self, note: Optional[str] = None, dropped: bool = False) -> bool:
+        """The person leaves the line: the voice gets their note (from them, like an answer), what was said meanwhile (as
+        information), and carries on."""
+        if self.state.phase != "live" or not (self.state.handover or self.state.hold_reason == "owner"):
+            return False
+        name = self.setup.name
+        self.state.handover = self.state.say_handover = False
+        note = re.sub(r"\s+", " ", str(note or "")).strip()[:300]
+        if note and B.screen(note, self.setup.never_share):
+            self._note("assistant", f"[{name}'s note held back: it can't go on a call]")
+            note = ""
+        if note:
+            self.state.answers.append({"kind": "note", "question": "", "answer": note})
+        self._note("assistant", f"[the line to {name} dropped]" if dropped else f"[{name} handed the call back]")
+        now = (f"The line to {name} dropped while {name} was speaking with them. Apologize briefly that {name} was cut off, then carry on toward the goal."
+               if dropped else f"{name} spoke with them directly and has handed the call back to you. Carry on toward the goal; don't repeat what was settled.")
+        await self._instructions(now)
+        await self._twilio("clear")  # the person's last words still queued
+        await self._back_to_voice(context=f"[What was said on the line while {name} was on it, both voices, as heard:] ")
+        return True
 
     def _clean_outcome(self, args: Dict[str, Any]) -> Dict[str, Any]:
         status = args.get("status") if args.get("status") in P.STATUSES else "done"
@@ -659,7 +876,9 @@ class Brain:
             if value:
                 out[key] = value
         # The status is checked against what was written down: no quote without a figure, no booking on a call that may not book.
-        if (status == "quoted" and recorded and not any(out.get(k) for k in recorded)) or (status == "booked" and self.setup.brief["mode"] != "book"):
+        approved = any(a.get("kind") == "approval" for a in self.state.answers)
+        if (status == "quoted" and recorded and not any(out.get(k) for k in recorded)) or (
+                status == "booked" and self.setup.brief["mode"] != "book" and not approved):
             out["status"] = "call_back"
         if args.get("dont_call_again") is True or self.state.no_more_calls:
             out["dont_call_again"] = True
@@ -687,6 +906,11 @@ class Brain:
             self.state.outcome = self.state.outcome or {"status": "no_answer", "notes": "A call screener took the message; nobody came on the line."}
             await self.finish()
             return
+        if self.state.handover and now - self.state.handover_at >= OPENING_PLAY_MAX_S:
+            await self._owner_on()  # Twilio never echoed the mark
+        if (self.state.hold_reason == "checking" and not self.state.force_pending and not self.state.response
+                and now - max(self.state.reassured_at, self.state.hold_since) >= REASSURE_EVERY_S):
+            await self._reassure()
         if self.state.nudge_at and now >= self.state.nudge_at:
             self.state.nudge_at = 0.0
             if self.state.responses == self.state.nudge_after and not self.state.response and self.state.phase == "live":
@@ -700,7 +924,7 @@ class Brain:
                 # which could cut a person off.
                 self.state.last_clear = now
                 await self._grok({"type": "input_audio_buffer.clear"})
-            if now - self.state.hold_since >= self.setup.hold_minutes * 60:
+            if self.state.hold_reason == "hold" and now - self.state.hold_since >= self.setup.hold_minutes * 60:
                 self.state.outcome = self.state.outcome or {"status": "call_back", "notes": "On hold too long; nobody came on the line."}
                 await self.finish()
                 return

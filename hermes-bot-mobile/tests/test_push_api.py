@@ -36,11 +36,24 @@ class PushApi(unittest.TestCase):
         self.assertEqual(payload["url"], notify.INBOX)
         self.assertEqual((headers["TTL"], headers["Urgency"]), ("3600", "high"))
 
-    def test_a_question_on_the_line_expires_in_a_minute(self):
+    def test_a_question_on_the_line_expires_with_its_longest_wait(self):
         self.send("call_question", body="Pine Valley asks: is the lid exposed?", url="hermesbot://bot/juniper")
         url, headers, body = self.net.calls[0]
         payload = json.loads(self.phone.read(body))
-        self.assertEqual((headers["TTL"], payload["type"], payload["url"]), ("60", "Calls", "hermesbot://bot/juniper"))
+        self.assertEqual((headers["TTL"], payload["type"], payload["url"]), ("180", "Calls", "hermesbot://bot/juniper"))
+        self.assertNotIn("actions", payload)
+
+    def test_buttons_open_the_apps_own_links_three_at_most(self):
+        self.assertEqual(push_api.VERSION, 2)
+        actions = [{"title": "Allow", "url": "hermesbot://phone/answer?ask=a1&approved=1"},
+                   {"title": "Deny", "url": "hermesbot://phone/answer?ask=a1&approved=0"},
+                   {"title": "Elsewhere", "url": "https://example.com/x"},
+                   {"title": "", "url": "hermesbot://phone/join"},
+                   {"title": "Join the call", "url": "hermesbot://phone/join?call=c1"},
+                   {"title": "A fourth", "url": "hermesbot://inbox"}]
+        self.send("call_question", body="Pine Valley: 8 pm instead of 7 pm. Allow it?", actions=actions)
+        payload = json.loads(self.phone.read(self.net.calls[0][2]))
+        self.assertEqual([a["title"] for a in payload["actions"]], ["Allow", "Deny", "Join the call"])
 
     def test_the_same_key_replaces_its_notification(self):
         self.send()

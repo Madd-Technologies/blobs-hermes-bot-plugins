@@ -71,7 +71,9 @@ base = "/api/plugins/hermes-phone"
 
 status = client.get(f"{base}/status").json()
 print("status:", status)
-assert status["version"] == "0.1.2" and status["line"] == {"set": True, "number": "…23"}, status
+version = next(line.split(":", 1)[1].strip() for line in (PLUGIN / "plugin.yaml").read_text().splitlines() if line.startswith("version:"))
+assert status["version"] == version and status["line"] == {"set": True, "number": "…23"}, status
+assert status["features"] == ["ask_kinds", "listen"], status
 
 settings = client.put(f"{base}/settings", json={"name": "Alex", "never_share_add": [{"label": "Home address", "value": "12 Orchard Lane, Pinecrest"}],
                                                 "test_numbers": ["202-555-0101"]}).json()
@@ -92,7 +94,8 @@ assert approved["status"] == "approved" and "token" not in approved["calls"][0],
 report = json.loads(registry.get_entry("phone_call_report").handler({"errand_id": made["errand_id"]}))
 assert report["errands"][0]["status"] == "approved", report
 
-from tools.bot_live_delivery import deliver_to_live_owner, find_canonical_live_owner, find_canonical_owner  # noqa: E402,F401
+# deliver.py needs these two; find_canonical_owner only on Hermes versions that have it (newer ones route through the authority).
+from tools.bot_live_delivery import deliver_to_live_owner, find_canonical_live_owner  # noqa: E402,F401
 from tools.bot_relay import acquire_turn_lock  # noqa: E402,F401
 from hermes_cli.auth import resolve_xai_oauth_runtime_credentials  # noqa: E402,F401
 
@@ -125,11 +128,43 @@ try:
     errand = client.get(f"{base}/errands/{made['errand_id']}").json()
     print("after the first steps:", errand["status"], [c["status"] for c in errand["calls"]], errand.get("problem"))
     assert "calling hours" in (errand.get("problem") or "") and errand["calls"][0]["status"] == "waiting", errand
+
+    # Listening in: no ticket for a call that isn't on the line; a ticket for one that is opens the service's socket once,
+    # with the subprotocol answered, and it says the call ended when the call is no longer on the line.
+    call_id = errand["calls"][0]["id"]
+    refused = client.post(f"{base}/errands/{made['errand_id']}/calls/{call_id}/listen")
+    assert refused.status_code == 409 and refused.json()["detail"]["reason"] == "not_live", refused.text
+    import store as S  # noqa: E402
+
+    phone_store = S.Store(home)
+    phone_store.update_call(made["errand_id"], call_id, lambda c: c.update(status="live"))
+    ticket = client.post(f"{base}/errands/{made['errand_id']}/calls/{call_id}/listen").json()
+    assert ticket["url"] == "wss://node.example.ts.net:8443/app/listen" and ticket["protocols"][0] == "hermes-phone.listen", ticket
+    import asyncio  # noqa: E402
+
+    import websockets  # noqa: E402
+
+    async def listen_once():
+        local = f"ws://127.0.0.1:{port}/app/listen"
+        async with websockets.connect(local, subprotocols=ticket["protocols"]) as ws:
+            assert ws.subprotocol == "hermes-phone.listen", ws.subprotocol
+            phone_store.update_call(made["errand_id"], call_id, lambda c: c.update(status="waiting"))
+            ended = json.loads(await asyncio.wait_for(ws.recv(), 10))
+            assert ended == {"type": "end"}, ended
+        try:
+            async with websockets.connect(local, subprotocols=ticket["protocols"]) as ws:
+                await asyncio.wait_for(ws.recv(), 5)
+            raise AssertionError("a spent ticket opened the socket again")
+        except websockets.exceptions.WebSocketException:
+            pass
+
+    asyncio.run(listen_once())
+    print("listen: a ticket opened the socket once")
 finally:
     service.terminate()
     output = service.communicate(timeout=10)[0]
 print("service log:", output.strip()[-800:])
-assert "not-real" not in output and "/twilio/stream/" not in output, "the service logged a secret or a call path"
+assert "not-real" not in output and "/twilio/stream/" not in output and "ticket." not in output, "the service logged a secret or a call path"
 
 shutil.rmtree(home)
 print("OK")

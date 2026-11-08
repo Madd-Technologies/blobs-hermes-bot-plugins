@@ -168,6 +168,8 @@ class PhoneTools:
             answers = [a for a in call.get("answers") or [] if a.get("answer")]
             if answers:
                 row["your_person_answered"] = [{"question": a["question"], "answer": a["answer"]} for a in answers]
+            if any(entry.get("what") == "took_over" for entry in call.get("log") or []):
+                row["your_person_joined"] = True
             if transcript and call.get("transcript"):
                 row["transcript"] = [{"who": line["who"], "text": line["text"]} for line in call["transcript"]]
             calls.append(row)
