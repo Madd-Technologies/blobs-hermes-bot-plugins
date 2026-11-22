@@ -376,3 +376,62 @@ class Muting(Setup):
         with self.assertRaises(S.DashboardError):
             self.store.mute(YOU, self.first["id"], "soon")
 
+    def test_bulk_action_close_reopen_mute_and_partial_failures(self):
+        result = self.store.bulk_action(YOU, [self.first["id"], "missing_id", self.second["id"]], "close")
+        self.assertEqual(result["updated"], [self.first["id"], self.second["id"]])
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertEqual(result["failed"][0]["id"], "missing_id")
+        self.assertEqual(self.store.summary()["concierge"]["needs_you"], 0)
+
+        reopened = self.store.bulk_action(YOU, [self.first["id"], self.second["id"]], "reopen")
+        self.assertEqual(reopened["updated"], [self.first["id"], self.second["id"]])
+        self.assertEqual(reopened["failed"], [])
+        self.assertEqual(self.store.summary()["concierge"]["needs_you"], 2)
+
+        muted = self.store.bulk_action(YOU, [self.first["id"], self.second["id"]], "mute", until=self.now[0] + 7200)
+        self.assertEqual(muted["updated"], [self.first["id"], self.second["id"]])
+        self.assertEqual(self.store.summary()["concierge"]["needs_you"], 0)
+
+        with self.assertRaises(S.DashboardError):
+            self.store.bulk_action(CONCIERGE, [self.first["id"]], "close")
+        with self.assertRaises(S.DashboardError):
+            self.store.bulk_action(YOU, [], "close")
+
+    def test_needs_you_records_sorted_by_urgency_and_deadline(self):
+        self.store.create_collection(
+            CONCIERGE,
+            {
+                "id": "queue",
+                "title": "Queue",
+                "fields": [
+                    {"key": "title", "type": "text", "required": True},
+                    {"key": "due", "type": "datetime"},
+                    {"key": "severity", "type": "choice", "options": ["low", "warn", "bad"]},
+                ],
+            },
+        )
+        self.store.set_view(
+            CONCIERGE,
+            {
+                "id": "queue-list",
+                "title": "Queue",
+                "kind": "list",
+                "collection": "queue",
+                "config": {
+                    "show": {"title": "title", "meta": "due"},
+                    "signals": [
+                        {"when": {"field": "severity", "op": "eq", "value": "bad"}, "tone": "bad"},
+                        {"when": {"field": "severity", "op": "eq", "value": "warn"}, "tone": "warn"},
+                    ],
+                    "needs_you": {"field": "due", "op": "gt", "value": 0},
+                },
+            },
+        )
+        r_later = self.store.upsert(CONCIERGE, "queue", [{"source_key": "q1", "values": {"title": "Later", "due": self.now[0] + 7200}}])[0]["record"]
+        r_sooner = self.store.upsert(CONCIERGE, "queue", [{"source_key": "q2", "values": {"title": "Sooner", "due": self.now[0] + 600}}])[0]["record"]
+        r_bad = self.store.upsert(CONCIERGE, "queue", [{"source_key": "q3", "values": {"title": "Urgent", "due": self.now[0] + 99999, "severity": "bad"}}])[0]["record"]
+
+        ids = [entry["row"]["id"] for entry in self.store.needs_you_records("concierge") if entry["view"] == "queue-list"]
+        self.assertEqual(ids, [r_bad["id"], r_sooner["id"], r_later["id"]])
+
+

@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -163,6 +164,18 @@ async def page(bot: str, view_id: str, bucket: str | None = None, metric: int | 
     group_by?, period?, start?, end?, metric?, fields, live, now}`. `bucket` names a chart's bar (its start date), `metric`
     a stat's metric (from 0). Rows open records; nothing on a page opens another page."""
     return _guard(lambda S, store: store.page(bot, view_id, bucket=bucket, metric=metric, offset=offset))
+
+
+class BulkRecords(BaseModel):
+    ids: list[str]
+    action: Literal["close", "reopen", "mute"]
+    until: int | None = None
+
+
+@router.post("/records/bulk")
+async def bulk_records(body: BulkRecords) -> dict:
+    """Applies `close`, `reopen`, or `mute` across many records in one transaction."""
+    return _guard(lambda S, store: store.bulk_action(S.Actor.person(), body.ids, body.action, body.until))
 
 
 @router.get("/records/{record_id}")

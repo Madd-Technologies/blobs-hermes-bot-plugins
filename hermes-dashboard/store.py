@@ -21,6 +21,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -766,34 +767,38 @@ class Store:
 
             return {"record": record, "changed": changed, "kept": kept}
 
+    def _apply_closed(self, conn, actor: Actor, collection: dict, record: dict, closed: bool) -> dict:
+        status = F.status_field(collection["fields"])
+
+        if status and status.get("readonly") and actor.kind == "person":
+            raise DashboardError(f"{status['label']} is kept by {collection['owner']}; it closes the record itself")
+
+        if status:
+            stage = record["values"].get(status["key"])
+            is_done = stage in F.done_stages(status)
+
+            if is_done == closed:
+                return {"record": record, "changed": [], "kept": []}
+
+            record, changed, kept = self._apply(conn, collection, record, {status["key"]: F.first_stage(status, done=closed)}, actor, override_person=actor.kind == "person")
+
+            return {"record": record, "changed": changed, "kept": kept}
+
+        if bool(record["closed_at"]) == closed:
+            return {"record": record, "changed": [], "kept": []}
+
+        now = self._now()
+        conn.execute("UPDATE records SET closed_at = ?, updated_at = ? WHERE id = ?", (now if closed else None, now, record["id"]))
+        self._log(conn, record["id"], actor, "_closed" if closed else "_reopened", None, None, now)
+
+        return {"record": self._record(conn.execute("SELECT * FROM records WHERE id = ?", (record["id"],)).fetchone()), "changed": ["_closed"], "kept": []}
+
     def set_closed(self, actor: Actor, record_id: str, closed: bool) -> dict:
         """Closes a record (its status moves to the first done stage) or opens it again (the first open stage)."""
         with self._db(write=True) as conn:
             collection, record = self._find_record(conn, actor, record_id, write=True)
-            status = F.status_field(collection["fields"])
 
-            if status and status.get("readonly") and actor.kind == "person":
-                raise DashboardError(f"{status['label']} is kept by {collection['owner']}; it closes the record itself")
-
-            if status:
-                stage = record["values"].get(status["key"])
-                is_done = stage in F.done_stages(status)
-
-                if is_done == closed:
-                    return {"record": record, "changed": [], "kept": []}
-
-                record, changed, kept = self._apply(conn, collection, record, {status["key"]: F.first_stage(status, done=closed)}, actor, override_person=actor.kind == "person")
-
-                return {"record": record, "changed": changed, "kept": kept}
-
-            if bool(record["closed_at"]) == closed:
-                return {"record": record, "changed": [], "kept": []}
-
-            now = self._now()
-            conn.execute("UPDATE records SET closed_at = ?, updated_at = ? WHERE id = ?", (now if closed else None, now, record["id"]))
-            self._log(conn, record["id"], actor, "_closed" if closed else "_reopened", None, None, now)
-
-            return {"record": self._record(conn.execute("SELECT * FROM records WHERE id = ?", (record["id"],)).fetchone()), "changed": ["_closed"], "kept": []}
+            return self._apply_closed(conn, actor, collection, record, closed)
 
     def add_note(self, actor: Actor, record_id: str, text) -> dict:
         note = _text(text, "note", MAX_NOTE, required=True, single_line=False)[:MAX_NOTE]
@@ -807,6 +812,29 @@ class Store:
 
             return {"record": record["id"], "note": note, "at": now, "by": actor.name}
 
+    def _validate_mute_until(self, until, now: int) -> int | None:
+        if until is None:
+            return None
+
+        try:
+            clean = min(int(until), MUTE_FOREVER)
+        except (TypeError, ValueError):
+            raise DashboardError("until is a time in epoch seconds, or null to unmute") from None
+
+        if clean <= now:
+            raise DashboardError("pick a time that is still ahead")
+
+        return clean
+
+    def _apply_mute(self, conn, actor: Actor, record: dict, until: int | None, now: int) -> dict:
+        was = record["muted_until"] if Q.muted(record, now) else None
+
+        if was != until:
+            conn.execute("UPDATE records SET muted_until = ? WHERE id = ?", (until, record["id"]))
+            self._log(conn, record["id"], actor, "_muted", was, until, now)
+
+        return {"record": {**record, "muted_until": until}}
+
     def mute(self, actor: Actor, record_id: str, until) -> dict:
         """The person mutes a record until a time (epoch seconds; MUTE_FOREVER for "until I unmute") or unmutes it (None):
         while muted it lights no amber dot, leaves Needs you and waits at the bottom of its panels."""
@@ -814,25 +842,45 @@ class Store:
             raise DashboardError("a record is muted by the person")
 
         now = self._now()
-
-        if until is not None:
-            try:
-                until = min(int(until), MUTE_FOREVER)
-            except (TypeError, ValueError):
-                raise DashboardError("until is a time in epoch seconds, or null to unmute") from None
-
-            if until <= now:
-                raise DashboardError("pick a time that is still ahead")
+        until = self._validate_mute_until(until, now)
 
         with self._db(write=True) as conn:
             _, record = self._find_record(conn, actor, record_id, write=True)
-            was = record["muted_until"] if Q.muted(record, now) else None
 
-            if was != until:
-                conn.execute("UPDATE records SET muted_until = ? WHERE id = ?", (until, record["id"]))
-                self._log(conn, record["id"], actor, "_muted", was, until, now)
+            return self._apply_mute(conn, actor, record, until, now)
 
-            return {"record": {**record, "muted_until": until}}
+    def bulk_action(self, actor: Actor, record_ids: list[str], action: str, until=None) -> dict:
+        """Applies `close`, `reopen`, or `mute` across up to 200 records in one transaction, returning updated IDs and per-record errors."""
+        if actor.kind != "person":
+            raise DashboardError("bulk record actions are performed by the person")
+
+        if action not in ("close", "reopen", "mute"):
+            raise DashboardError("action must be close, reopen, or mute")
+
+        if not isinstance(record_ids, list) or not record_ids or len(record_ids) > 200:
+            raise DashboardError("provide between 1 and 200 record ids")
+
+        now = self._now()
+        clean_until = self._validate_mute_until(until, now) if action == "mute" else None
+        unique_ids = list(dict.fromkeys(str(item or "") for item in record_ids))
+        updated: list[str] = []
+        failed: list[dict] = []
+
+        with self._db(write=True) as conn:
+            for record_id in unique_ids:
+                try:
+                    collection, record = self._find_record(conn, actor, record_id, write=True)
+
+                    if action == "mute":
+                        self._apply_mute(conn, actor, record, clean_until, now)
+                    else:
+                        self._apply_closed(conn, actor, collection, record, action == "close")
+
+                    updated.append(record["id"])
+                except (DashboardError, NotFound) as error:
+                    failed.append({"id": record_id, "error": str(error)})
+
+        return {"updated": updated, "failed": failed}
 
     def start_action(self, actor: Actor, record_id: str, action_id: str, session: str | None = None, digest: str | None = None) -> dict:
         """The person pressed one of a collection's buttons on a record: it is logged, the record waits on the bot (no
@@ -1384,9 +1432,27 @@ class Store:
         return {**result, "fields": fields, "live": bool(source), "now": now, **({"collection_title": collection["title"]} if collection else {})}
 
     def needs_you_records(self, profile: str) -> list[dict]:
-        """The open records on a bot's dashboard that need the person, once each, with the view that flags them."""
+        """The open records on a bot's dashboard that need the person, once each, sorted by urgency, due time, and recency."""
         now = self._now()
-        found: dict = {}
+        found: dict[str, tuple[tuple[int, float, int, int], dict]] = {}
+        signal_rank = {"bad": 0, "warn": 1, None: 2, "good": 3}
+
+        def due_epoch(meta: dict | None) -> float:
+            if not isinstance(meta, dict):
+                return float("inf")
+            kind = meta.get("type")
+            val = meta.get("value")
+            if kind == "datetime":
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return float("inf")
+            if kind == "date" and isinstance(val, str):
+                try:
+                    return datetime.strptime(val[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+                except ValueError:
+                    return float("inf")
+            return float("inf")
 
         with self._db() as conn:
             views = [self._view(row) for row in conn.execute("SELECT * FROM views WHERE dashboard = ? AND collection IS NOT NULL ORDER BY position", (Actor.bot(profile).name,))]
@@ -1405,6 +1471,13 @@ class Store:
 
                 for record in self._records(conn, collection["key"]):
                     if record["id"] not in found and Q.matches(view["config"].get("filter"), record, collection["fields"], now) and Q.needs_you(record, view["config"], collection["fields"], now):
-                        found[record["id"]] = {"view": view["id"], "view_title": view["title"], "row": Q._row(record, config, collection["fields"], now)}
+                        rendered = Q._row(record, config, collection["fields"], now)
+                        rank = (
+                            signal_rank.get(rendered.get("signal"), 2),
+                            due_epoch(rendered.get("meta")),
+                            -(record.get("updated_at") or 0),
+                            len(found),
+                        )
+                        found[record["id"]] = (rank, {"view": view["id"], "view_title": view["title"], "row": rendered})
 
-        return list(found.values())
+        return [item for _, item in sorted(found.values(), key=lambda pair: pair[0])]

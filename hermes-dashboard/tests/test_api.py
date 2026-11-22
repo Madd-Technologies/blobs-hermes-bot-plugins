@@ -159,6 +159,15 @@ class Api(unittest.TestCase):
         self.assertEqual(self.client.patch(f"{self.base}/records/{self.record['id']}", json={"values": {"status": "Archived"}}).status_code, 400)
         self.assertEqual(self.client.get(f"{self.base}/bots/Not_A_Bot").status_code, 400)
 
+    def test_bulk_records(self):
+        body = self.client.post(f"{self.base}/records/bulk", json={"ids": [self.record["id"], "nope"], "action": "close"}).json()
+        self.assertEqual(body["updated"], [self.record["id"]])
+        self.assertEqual(len(body["failed"]), 1)
+        self.assertEqual(self.client.get(f"{self.base}/bots").json()["bots"]["concierge"]["needs_you"], 0)
+        reopen = self.client.post(f"{self.base}/records/bulk", json={"ids": [self.record["id"]], "action": "reopen"}).json()
+        self.assertEqual(reopen["updated"], [self.record["id"]])
+        self.assertEqual(self.client.get(f"{self.base}/bots").json()["bots"]["concierge"]["needs_you"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
