@@ -168,6 +168,11 @@ class Api(unittest.TestCase):
         self.assertEqual(reopen["updated"], [self.record["id"]])
         self.assertEqual(self.client.get(f"{self.base}/bots").json()["bots"]["concierge"]["needs_you"], 1)
 
+    def test_inbox_sweep_endpoint(self):
+        response = self.client.post(f"{self.base}/inbox/sweep", json={"profile": "concierge"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"closed": [], "muted": []})
+
 
 if __name__ == "__main__":
     unittest.main()

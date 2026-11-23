@@ -25,6 +25,8 @@ NO_VALUE = ("empty", "not_empty", "is_open", "is_done")
 DAYS_OPS = ("within_days", "in_last_days", "older_than_days")
 
 KINDS = ("list", "checklist", "board", "table", "number", "chart", "summary", "stat")
+INBOX_TIERS = ("interrupt", "review", "dashboard_only")
+STALE_ACTIONS = ("none", "mute", "close")
 AGGREGATES = ("count", "sum", "avg", "min", "max")
 BUCKETS = ("day", "week", "month")
 MAX_DEPTH = 4
@@ -549,6 +551,38 @@ def clean_view_config(kind: str, raw, fields: list[dict] | None) -> dict:
     config["filter"] = clean_filter(raw.get("filter"), fields)
     config["needs_you"] = clean_filter(raw.get("needs_you"), fields)
 
+    if raw.get("inbox") is not None:
+        inbox = str(raw["inbox"]).strip().lower()
+
+        if inbox not in INBOX_TIERS:
+            raise QueryError("inbox must be interrupt, review, or dashboard_only")
+
+        config["inbox"] = inbox
+
+    if raw.get("stale_after_days") is not None:
+        raw_days = raw["stale_after_days"]
+
+        if isinstance(raw_days, bool):
+            raise QueryError("stale_after_days must be between 1 and 365")
+
+        try:
+            days = int(raw_days)
+        except (TypeError, ValueError):
+            raise QueryError("stale_after_days must be between 1 and 365") from None
+
+        if not 1 <= days <= 365:
+            raise QueryError("stale_after_days must be between 1 and 365")
+
+        config["stale_after_days"] = days
+
+    if raw.get("stale_action") is not None:
+        stale_action = str(raw["stale_action"]).strip().lower()
+
+        if stale_action not in STALE_ACTIONS:
+            raise QueryError("stale_action must be none, mute, or close")
+
+        config["stale_action"] = stale_action
+
     if kind in ("list", "checklist", "board", "table"):
         # Only rows carry a signal; a number or chart drops the key like any other it doesn't use.
         config["signals"] = clean_signals(raw.get("signals"), fields)
@@ -719,6 +753,18 @@ def needs_you(record: dict, config: dict, fields: list[dict], now: float) -> boo
     rule = config.get("needs_you")
 
     return bool(rule) and not record.get("closed_at") and not running(record, now) and not muted(record, now) and matches(rule, record, fields, now)
+
+
+def is_stale(record: dict, config: dict, now: float) -> bool:
+    """Whether an open record has gone un-updated past this view's `stale_after_days` window."""
+    days = config.get("stale_after_days")
+
+    if not days:
+        return False
+
+    updated = record.get("updated_at") or record.get("created_at") or 0
+
+    return bool(updated and (now - updated) >= int(days) * 86_400)
 
 
 def _muted_last(records: list[dict], now: float) -> list[dict]:

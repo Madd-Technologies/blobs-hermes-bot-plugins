@@ -182,6 +182,30 @@ class Views(unittest.TestCase):
         with self.assertRaises(Q.QueryError):
             Q.clean_view_config("board", {"group_by": "customer", "show": {"title": "customer"}}, FIELDS)
 
+    def test_inbox_tier_and_stale_rules_validation_and_evaluation(self):
+        cfg = Q.clean_view_config(
+            "list",
+            {
+                "show": {"title": "customer"},
+                "needs_you": {"op": "is_open"},
+                "inbox": "interrupt",
+                "stale_after_days": 7,
+                "stale_action": "mute",
+            },
+            FIELDS,
+        )
+        self.assertEqual((cfg["inbox"], cfg["stale_after_days"], cfg["stale_action"]), ("interrupt", 7, "mute"))
+
+        for bad in ({"inbox": "urgent"}, {"stale_after_days": 0}, {"stale_after_days": 400}, {"stale_after_days": True}, {"stale_action": "delete"}):
+            with self.assertRaises(Q.QueryError):
+                Q.clean_view_config("list", {"show": {"title": "customer"}, **bad}, FIELDS)
+
+        fresh = {"updated_at": NOW - 3 * 86_400}
+        old = {"updated_at": NOW - 8 * 86_400}
+        self.assertFalse(Q.is_stale(fresh, cfg, NOW))
+        self.assertTrue(Q.is_stale(old, cfg, NOW))
+        self.assertFalse(Q.is_stale(old, {"show": {"title": "customer"}}, NOW))
+
 
 if __name__ == "__main__":
     unittest.main()

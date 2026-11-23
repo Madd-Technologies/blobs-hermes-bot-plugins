@@ -435,3 +435,101 @@ class Muting(Setup):
         self.assertEqual(ids, [r_bad["id"], r_sooner["id"], r_later["id"]])
 
 
+class InboxTiers(Setup):
+    def test_tiered_inbox_rich_fields_and_stale_sweep(self):
+        self.store.create_collection(
+            CONCIERGE,
+            {
+                "id": "triage",
+                "title": "Triage",
+                "fields": [
+                    {"key": "title", "type": "text", "required": True},
+                    {"key": "notes", "type": "longtext"},
+                    {"key": "reply", "type": "draft", "to": "title"},
+                    {"key": "tier", "type": "choice", "options": ["urgent", "backlog", "quiet"]},
+                ],
+                "actions": [{"id": "send", "label": "Send reply", "prompt": "Send this draft", "draft": "reply"}],
+            },
+        )
+        self.store.set_view(
+            CONCIERGE,
+            {
+                "id": "quiet-board",
+                "title": "Dashboard only",
+                "kind": "list",
+                "collection": "triage",
+                "config": {
+                    "show": {"title": "title"},
+                    "filter": {"field": "tier", "op": "eq", "value": "quiet"},
+                    "needs_you": {"op": "is_open"},
+                    "inbox": "dashboard_only",
+                },
+            },
+        )
+        self.store.set_view(
+            CONCIERGE,
+            {
+                "id": "backlog",
+                "title": "Backlog",
+                "kind": "list",
+                "collection": "triage",
+                "config": {
+                    "show": {"title": "title"},
+                    "filter": {"field": "tier", "op": "ne", "value": "quiet"},
+                    "needs_you": {"op": "is_open"},
+                    "inbox": "review",
+                    "stale_after_days": 5,
+                    "stale_action": "close",
+                },
+            },
+        )
+        self.store.set_view(
+            CONCIERGE,
+            {
+                "id": "urgent",
+                "title": "Urgent",
+                "kind": "list",
+                "collection": "triage",
+                "config": {
+                    "show": {"title": "title"},
+                    "filter": {"field": "tier", "op": "eq", "value": "urgent"},
+                    "needs_you": {"op": "is_open"},
+                    "inbox": "interrupt",
+                },
+            },
+        )
+
+        quiet_r = self.store.upsert(CONCIERGE, "triage", [{"source_key": "q1", "values": {"title": "Quiet", "tier": "quiet"}}])[0]["record"]
+        self.now[0] -= 10 * 86_400
+        old_review = self.store.upsert(CONCIERGE, "triage", [{"source_key": "b1", "values": {"title": "Old review", "tier": "backlog", "notes": "Lots of whitespace\n  across lines"}}])[0]["record"]
+        self.now[0] += 10 * 86_400
+        urgent_r = self.store.upsert(CONCIERGE, "triage", [{"source_key": "u1", "values": {"title": "Urgent item", "tier": "urgent", "reply": "Approved text"}}])[0]["record"]
+
+        # dashboard_only counts on dashboard panels, not global summary or needs_you_records.
+        summary = self.store.summary()["concierge"]
+        self.assertEqual(summary["needs_you"], 2)
+
+        # urgent_r matches both backlog (review, pos 2) and urgent (interrupt, pos 3); interrupt wins and sorts first.
+        records = self.store.needs_you_records("concierge")
+        self.assertEqual([entry["row"]["id"] for entry in records], [urgent_r["id"], old_review["id"]])
+        self.assertNotIn(quiet_r["id"], [entry["row"]["id"] for entry in records])
+
+        first, second = records
+        self.assertEqual(first["inbox"], "interrupt")
+        self.assertEqual(first["view"], "urgent")
+        self.assertTrue(first["has_draft"])
+        self.assertEqual(first["body_snippet"], "Approved text")
+        self.assertEqual(first["primary_action"], {"id": "send", "label": "Send reply"})
+        self.assertFalse(first["stale"])
+
+        self.assertEqual(second["inbox"], "review")
+        self.assertFalse(second["has_draft"])
+        self.assertEqual(second["body_snippet"], "Lots of whitespace across lines")
+        self.assertNotIn("primary_action", second)
+        self.assertTrue(second["stale"])
+
+        swept = self.store.sweep_stale("concierge")
+        self.assertEqual(swept, {"closed": [old_review["id"]], "muted": []})
+        self.assertEqual([entry["row"]["id"] for entry in self.store.needs_you_records("concierge")], [urgent_r["id"]])
+
+

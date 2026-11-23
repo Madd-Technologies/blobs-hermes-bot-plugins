@@ -1384,6 +1384,10 @@ class Store:
 
                     row = conn.execute("SELECT config FROM views WHERE key = ?", (f"{profile}/{view['id']}",)).fetchone()
                     config = json.loads(row["config"]) if row else {}
+
+                    if config.get("inbox") == "dashboard_only":
+                        continue
+
                     fields = board["collections"][view["collection"]]["fields"]
 
                     for record in self._records(conn, view["collection"]):
@@ -1456,28 +1460,138 @@ class Store:
 
         with self._db() as conn:
             views = [self._view(row) for row in conn.execute("SELECT * FROM views WHERE dashboard = ? AND collection IS NOT NULL ORDER BY position", (Actor.bot(profile).name,))]
-            # A record flagged by both a number and a list is named the way the list shows it (numbers have no rows).
-            views.sort(key=lambda view: not view["config"].get("show"))
+            # Interrupt views claim shared records before review views; within a tier, list views with `show` beat number views.
+            views.sort(key=lambda view: (0 if (view["config"].get("inbox") or "review") == "interrupt" else 1, not view["config"].get("show"), view["position"]))
 
             for view in views:
+                if (view["config"].get("inbox") or "review") == "dashboard_only":
+                    continue
+
                 row = conn.execute("SELECT * FROM collections WHERE key = ? AND retired_at IS NULL", (view["collection"],)).fetchone()
 
                 if not row or not view["config"].get("needs_you"):
                     continue
 
                 collection = self._collection(row)
+                fields = collection["fields"]
                 shown = next((other["config"]["show"] for other in views if other["collection"] == view["collection"] and other["config"].get("show")), None)
-                config = view["config"] if view["config"].get("show") else {**view["config"], "show": shown or {"title": _default_title(collection["fields"])}}
+                config = view["config"] if view["config"].get("show") else {**view["config"], "show": shown or {"title": _default_title(fields)}}
+                show = config.get("show") or {}
+                shown_keys = {show.get(slot) for slot in ("title", "subtitle", "meta") if show.get(slot)}
+                inbox_tier = config.get("inbox") or "review"
+                tier_rank = 0 if inbox_tier == "interrupt" else 1
 
                 for record in self._records(conn, collection["key"]):
-                    if record["id"] not in found and Q.matches(view["config"].get("filter"), record, collection["fields"], now) and Q.needs_you(record, view["config"], collection["fields"], now):
-                        rendered = Q._row(record, config, collection["fields"], now)
+                    if record["id"] not in found and Q.matches(view["config"].get("filter"), record, fields, now) and Q.needs_you(record, view["config"], fields, now):
+                        rendered = Q._row(record, config, fields, now)
+                        updated_at = int(record.get("updated_at") or record.get("created_at") or 0)
+                        stale = Q.is_stale(record, config, now)
+                        has_draft = any(
+                            field["type"] == "draft" and not field.get("retired") and str(record["values"].get(field["key"]) or "").strip()
+                            for field in fields
+                        )
+
+                        snippet_raw = ""
+                        for field_type in ("longtext", "draft"):
+                            snippet_raw = next(
+                                (
+                                    str(record["values"].get(field["key"]) or "")
+                                    for field in fields
+                                    if not field.get("retired")
+                                    and field["type"] == field_type
+                                    and field["key"] not in shown_keys
+                                    and str(record["values"].get(field["key"]) or "").strip()
+                                ),
+                                "",
+                            )
+                            if snippet_raw:
+                                break
+
+                        body_snippet = ""
+                        if snippet_raw:
+                            flat = " ".join(snippet_raw.split())
+                            body_snippet = flat[:137] + "..." if len(flat) > 140 else flat
+
+                        job = Q.running(record, now)
+                        primary_action = (
+                            next(
+                                ({"id": action["id"], "label": action["label"]} for action in collection.get("actions", []) if _offered(action, record, fields, now)),
+                                None,
+                            )
+                            if not record.get("closed_at") and not job
+                            else None
+                        )
+
                         rank = (
+                            tier_rank,
                             signal_rank.get(rendered.get("signal"), 2),
                             due_epoch(rendered.get("meta")),
-                            -(record.get("updated_at") or 0),
+                            -updated_at,
                             len(found),
                         )
-                        found[record["id"]] = (rank, {"view": view["id"], "view_title": view["title"], "row": rendered})
+                        entry = {
+                            "view": view["id"],
+                            "view_title": view["title"],
+                            "row": rendered,
+                            "inbox": inbox_tier,
+                            "has_draft": has_draft,
+                            "updated_at": updated_at,
+                            "stale": stale,
+                        }
+                        if body_snippet:
+                            entry["body_snippet"] = body_snippet
+                        if primary_action is not None:
+                            entry["primary_action"] = primary_action
+
+                        found[record["id"]] = (rank, entry)
 
         return [item for _, item in sorted(found.values(), key=lambda pair: pair[0])]
+
+    def sweep_stale(self, profile: str | None = None) -> dict:
+        """Applies `stale_action` (`mute` or `close`) to open `needs_you` records past `stale_after_days`."""
+        now = self._now()
+        target_profile = Actor.bot(profile).name if profile is not None else None
+        closed: list[str] = []
+        muted: list[str] = []
+        seen: set[str] = set()
+        person = Actor.person()
+
+        with self._db(write=True) as conn:
+            if target_profile is not None:
+                rows = conn.execute("SELECT * FROM views WHERE dashboard = ? AND collection IS NOT NULL ORDER BY position", (target_profile,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM views WHERE collection IS NOT NULL ORDER BY dashboard, position").fetchall()
+
+            for vrow in rows:
+                view = self._view(vrow)
+                config = view["config"]
+                stale_action = config.get("stale_action")
+
+                if not config.get("needs_you") or not config.get("stale_after_days") or stale_action not in ("mute", "close"):
+                    continue
+
+                crow = conn.execute("SELECT * FROM collections WHERE key = ? AND retired_at IS NULL", (view["collection"],)).fetchone()
+
+                if not crow:
+                    continue
+
+                collection = self._collection(crow)
+                fields = collection["fields"]
+
+                for record in self._records(conn, collection["key"]):
+                    rid = record["id"]
+
+                    if rid in seen:
+                        continue
+
+                    if Q.matches(config.get("filter"), record, fields, now) and Q.needs_you(record, config, fields, now) and Q.is_stale(record, config, now):
+                        seen.add(rid)
+
+                        if stale_action == "close":
+                            self._apply_closed(conn, person, collection, record, True)
+                            closed.append(rid)
+                        else:
+                            self._apply_mute(conn, person, record, int(now) + 7 * 86_400, now)
+                            muted.append(rid)
+
+        return {"closed": closed, "muted": muted}

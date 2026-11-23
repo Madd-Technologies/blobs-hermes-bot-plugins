@@ -172,10 +172,20 @@ class BulkRecords(BaseModel):
     until: int | None = None
 
 
+class SweepInbox(BaseModel):
+    profile: str | None = None
+
+
 @router.post("/records/bulk")
 async def bulk_records(body: BulkRecords) -> dict:
     """Applies `close`, `reopen`, or `mute` across many records in one transaction."""
     return _guard(lambda S, store: store.bulk_action(S.Actor.person(), body.ids, body.action, body.until))
+
+
+@router.post("/inbox/sweep")
+async def inbox_sweep(body: SweepInbox | None = None) -> dict:
+    """Applies configured `stale_action` (`mute` or `close`) to stale `needs_you` records."""
+    return _guard(lambda S, store: store.sweep_stale(body.profile if body else None))
 
 
 @router.get("/records/{record_id}")
