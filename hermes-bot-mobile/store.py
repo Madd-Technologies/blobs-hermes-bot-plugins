@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -21,15 +20,13 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-try:  # POSIX only; Hermes servers run on Linux and macOS, and the in-process lock covers the rest.
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
-
 try:
-    from . import webpush
+    from . import apns, webpush
+    from ._storage import JsonFile
 except ImportError:  # the tests import the modules flat
+    import apns  # type: ignore[no-redef]
     import webpush  # type: ignore[no-redef]
+    from _storage import JsonFile  # type: ignore[no-redef]
 
 MAX_DEVICES = 10
 MAX_ENDPOINT = 2048
@@ -115,68 +112,7 @@ def validate_device(endpoint: str, p256dh: str, auth: str) -> None:
         raise ValueError("p256dh is not a P-256 public key") from failure
 
 
-class JsonFile:
-    """One small JSON document with atomic writes and a lock around read-modify-write."""
-
-    _guards: dict[str, threading.Lock] = {}
-    _guards_lock = threading.Lock()
-
-    def __init__(self, path: Path, empty):
-        self.path = Path(path)
-        self._empty = empty
-
-        with JsonFile._guards_lock:
-            self._guard = JsonFile._guards.setdefault(str(self.path), threading.Lock())
-
-    def read(self):
-        try:
-            with open(self.path, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (FileNotFoundError, ValueError):
-            return self._empty()
-
-        return data if isinstance(data, type(self._empty())) else self._empty()
-
-    def update(self, change):
-        """Run `change(data)` under the lock and save what it leaves in `data`. Returns `change`'s result."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            os.chmod(self.path.parent, 0o700)
-        except OSError:  # pragma: no cover
-            pass
-
-        with self._guard:
-            lock = open(self.path.with_suffix(self.path.suffix + ".lock"), "a+")
-
-            try:
-                if fcntl is not None:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-
-                data = self.read()
-                result = change(data)
-                self._write(data)
-
-                return result
-            finally:
-                lock.close()
-
-    def _write(self, data) -> None:
-        handle, temp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name, suffix=".tmp")
-
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as out:
-                json.dump(data, out, indent=2, sort_keys=True)
-
-            os.chmod(temp, 0o600)  # the rows hold keys that let anyone with the endpoint push to the phone
-            os.replace(temp, self.path)
-        except BaseException:
-            try:
-                os.unlink(temp)
-            except OSError:
-                pass
-
-            raise
+    # JsonFile now lives in pure-stdlib _storage.py and is re-exported above.
 
 
 class DeviceStore:
@@ -212,9 +148,41 @@ class DeviceStore:
     def devices(self) -> list[dict]:
         return self._devices.read()
 
-    def upsert(self, endpoint: str, p256dh: str, auth: str, name: str = "") -> dict:
-        validate_device(endpoint, p256dh, auth)
-        identity = device_id(endpoint)
+    def upsert(
+        self,
+        endpoint: str = "",
+        p256dh: str = "",
+        auth: str = "",
+        name: str = "",
+        *,
+        platform: str = "webpush",
+        apns_token: str = "",
+        apns_env: str = "production",
+    ) -> dict:
+        if platform == "apns":
+            clean_token = str(apns_token or "").strip().lower()
+            apns.validate_apns_device(clean_token, apns_env)
+            identity = device_id(f"apns:{apns_env}:{clean_token}")
+            fields = {
+                "platform": "apns",
+                "apns_token": clean_token,
+                "apns_env": apns_env,
+                "endpoint": "",
+                "p256dh": "",
+                "auth": "",
+            }
+        elif platform == "webpush":
+            validate_device(endpoint, p256dh, auth)
+            identity = device_id(endpoint)
+            fields = {
+                "platform": "webpush",
+                "endpoint": endpoint,
+                "p256dh": p256dh,
+                "auth": auth,
+            }
+        else:
+            raise ValueError("platform must be webpush or apns")
+
         now = int(self._clock())
 
         def change(rows: list[dict]) -> dict:
@@ -224,7 +192,7 @@ class DeviceStore:
                 raise ValueError(f"at most {MAX_DEVICES} devices can be registered")
 
             row = existing or {"id": identity, "created": now}
-            row.update(endpoint=endpoint, p256dh=p256dh, auth=auth, name=str(name or "")[:60], updated=now)
+            row.update(**fields, name=str(name or "")[:60], updated=now)
 
             if existing is None:
                 rows.append(row)

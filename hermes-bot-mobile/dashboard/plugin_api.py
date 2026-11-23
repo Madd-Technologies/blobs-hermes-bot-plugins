@@ -129,6 +129,42 @@ def _kanban_module():
     return importlib.import_module(f"{_PACKAGE}.kanban_approvals")
 
 
+def _briefing():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.briefing")
+
+
+def _quiet():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.quiet")
+
+
+def _fleet():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.fleet")
+
+
+def _telemetry():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.telemetry")
+
+
+def _apns():
+    _package()
+
+    return importlib.import_module(f"{_PACKAGE}.apns")
+
+
+def _folder() -> Path:
+    store_module, _ = _modules()
+
+    return store_module.default_dir()
+
+
 #: The one watch of this dashboard's prompts: it swaps Hermes's open-requests table once per process.
 _NEEDS_YOU = None
 _NEEDS_YOU_LOCK = threading.Lock()
@@ -215,10 +251,13 @@ router = APIRouter()
 
 
 class DeviceIn(BaseModel):
-    endpoint: str
-    p256dh: str
-    auth: str
+    endpoint: str = ""
+    p256dh: str = ""
+    auth: str = ""
     name: str = ""
+    platform: Literal["webpush", "apns"] = "webpush"
+    apns_token: str = ""
+    apns_env: Literal["production", "sandbox"] = "production"
 
 
 class SettingsIn(BaseModel):
@@ -299,18 +338,35 @@ class TaildropIn(BaseModel):
 
 def _public(row: dict) -> dict:
     """A device without its keys: the app needs to recognise it, never to read the secrets back."""
-    return {
+    platform = row.get("platform", "webpush")
+    out = {
         "id": row.get("id"),
         "name": row.get("name", ""),
-        "host": urlsplit(row.get("endpoint", "")).hostname,
+        "platform": platform,
+        "host": "api.push.apple.com" if platform == "apns" else urlsplit(row.get("endpoint", "")).hostname,
         "created": row.get("created"),
         "last_ok": row.get("last_ok"),
         "last_error": row.get("last_error"),
     }
+    if platform == "apns":
+        out["apns_env"] = row.get("apns_env", "production")
+        out["token_prefix"] = (row.get("apns_token") or "")[:8]
+    return out
 
 
 #: What this copy pushes over `/api/ws`, so the app knows which of its own timers it can drop.
-FEATURES = ["needs_you", "watch", "rooms.changed", "room.live"]
+FEATURES = [
+    "needs_you",
+    "watch",
+    "rooms.changed",
+    "room.live",
+    "briefing",
+    "quiet_hours",
+    "fleet",
+    "telemetry",
+    "actionable_push",
+    "apns",
+]
 
 
 @router.get("/status")
@@ -340,7 +396,15 @@ def add_device(body: DeviceIn):
     store_module, _ = _modules()
 
     try:
-        row = store_module.DeviceStore().upsert(body.endpoint, body.p256dh, body.auth, body.name)
+        row = store_module.DeviceStore().upsert(
+            body.endpoint,
+            body.p256dh,
+            body.auth,
+            body.name,
+            platform=body.platform,
+            apns_token=body.apns_token,
+            apns_env=body.apns_env,
+        )
     except ValueError as failure:
         raise HTTPException(status_code=422, detail=str(failure))
 
@@ -705,6 +769,120 @@ async def chat_history_rows(session_id: str, ids: str, bot: str | None = None):
     history = _history()
 
     return {"session_id": resolved, "messages": [history.full_row(row) for row in project(rows, **options)]}
+
+
+class BriefingAckIn(BaseModel):
+    client: str = "default"
+    at: float | None = None
+
+
+class FleetPauseIn(BaseModel):
+    reason: str = ""
+
+
+class ApprovalIn(BaseModel):
+    choice: Literal["once", "session", "always", "deny"]
+    profile: str | None = None
+    kind: Literal["auto", "kanban", "session"] = "auto"
+
+
+@router.get("/activity")
+def get_activity(since: float | None = None, client: str = "default", limit: int = 100) -> dict:
+    """Events since the client last acknowledged the Morning Briefing (`since` defaults to stored ack or 24h)."""
+    return _briefing().BriefingStore(folder=_folder()).activity(since=since, client=client, limit=limit)
+
+
+@router.post("/briefing/ack")
+def ack_briefing(body: BriefingAckIn) -> dict:
+    """Marks the Morning Briefing caught up for this client."""
+    return _briefing().BriefingStore(folder=_folder()).ack(body.client, body.at)
+
+
+@router.get("/quiet-hours")
+def get_quiet_hours() -> dict:
+    return _quiet().QuietHours(folder=_folder()).get()
+
+
+@router.put("/quiet-hours")
+def set_quiet_hours(body: dict) -> dict:
+    try:
+        return _quiet().QuietHours(folder=_folder()).set(body)
+    except ValueError as failure:
+        raise HTTPException(status_code=422, detail=str(failure))
+
+
+@router.get("/fleet")
+def fleet_status() -> dict:
+    return _fleet().Fleet(folder=_folder()).status()
+
+
+@router.post("/fleet/pause")
+def fleet_pause(body: FleetPauseIn | None = None) -> dict:
+    return _fleet().Fleet(folder=_folder()).pause(body.reason if body else "")
+
+
+@router.post("/fleet/resume")
+def fleet_resume() -> dict:
+    return _fleet().Fleet(folder=_folder()).resume()
+
+
+@router.get("/telemetry")
+def telemetry_summary(days: int = 7) -> dict:
+    return _telemetry().summary(days=days)
+
+
+@router.get("/apns/status")
+def apns_status() -> dict:
+    return {"configured": _apns().is_configured(folder=_folder()), "features": FEATURES}
+
+
+def _resolve_session_approval(request_id: str, choice: str, profile: str | None) -> dict | None:
+    try:
+        from tui_gateway import server_requests
+
+        resolver = getattr(server_requests, "resolve", None) or getattr(server_requests, "respond", None)
+        if callable(resolver):
+            result = resolver(request_id, {"choice": choice, **({"profile": profile} if profile else {})})
+            if result is not None:
+                return {"answered": True, "id": request_id, "choice": choice, "kind": "session"}
+    except Exception:
+        pass
+
+    try:
+        from tools import approval as approval_tools
+
+        fn = getattr(approval_tools, "resolve_gateway_approval", None)
+        if callable(fn) and fn(request_id, choice):
+            return {"answered": True, "id": request_id, "choice": choice, "kind": "session"}
+    except Exception:
+        pass
+
+    return None
+
+
+@router.post("/approvals/{request_id}")
+def answer_approval(request_id: str, body: ApprovalIn):
+    """Resolves a kanban worker or live session approval from an interactive push notification or deep link."""
+    if body.kind in ("auto", "kanban"):
+        kanban = _kanban_module()
+
+        try:
+            result = kanban.KanbanApprovals().answer(request_id, body.choice)
+            if start_needs_you():
+                _needs_you().poke()
+            return result
+        except kanban.Refusal as refusal:
+            if refusal.status != 404 or body.kind == "kanban":
+                return _refusal(refusal)
+
+    resolved = _resolve_session_approval(request_id, body.choice, body.profile)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="No open approval with that id")
+
+    if start_needs_you():
+        _needs_you().poke()
+
+    return resolved
 
 
 if _hermes_history() is not None:

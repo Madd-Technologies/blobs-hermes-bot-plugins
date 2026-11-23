@@ -18,9 +18,11 @@ from typing import Optional
 
 try:
     from . import notify
+    from .quiet import QuietHours
     from .store import DeviceStore
 except ImportError:  # the tests import the modules flat
     import notify  # type: ignore[no-redef]
+    from quiet import QuietHours  # type: ignore[no-redef]
     from store import DeviceStore  # type: ignore[no-redef]
 
 #: `call`: a phone errand waits for the person's OK, or finished. `call_question`: a call on the line waits on an answer or an
@@ -42,6 +44,9 @@ def send(kind: str, *, profile: str, bot: str, body: str, key: str, url: Optiona
 
     if store.level(profile) == "off":
         return {"sent": 0, "skipped": "off"}
+
+    if QuietHours(store.folder).should_suppress(kind):
+        return {"sent": 0, "skipped": "quiet"}
 
     payload = notify.build(kind, profile=profile, bot=bot, body=notify.lines(kind, detail=notify.redact(body)), key=key,
                            url=url or notify.INBOX, actions=actions)

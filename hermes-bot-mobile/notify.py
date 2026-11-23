@@ -21,9 +21,10 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 try:
-    from . import webpush
+    from . import apns, webpush
     from .store import DeviceStore
 except ImportError:  # the tests import the modules flat
+    import apns  # type: ignore[no-redef]
     import webpush  # type: ignore[no-redef]
     from store import DeviceStore  # type: ignore[no-redef]
 
@@ -138,13 +139,23 @@ def link(profile: str, *, chat: str = "", room: str = "", page: str = "") -> str
     return f"{base}?chat={quote(chat, safe='')}" if chat else base
 
 
+def approve_link(request_id: str, profile: str, choice: str, kind: str = "session") -> str:
+    """Deep-link for one-tap approval action buttons (`Allow once`, `Deny`) on lock-screen notifications."""
+    return (
+        f"hermesbot://approve?id={quote(str(request_id), safe='')}"
+        f"&profile={quote(str(profile), safe='')}"
+        f"&choice={quote(str(choice), safe='')}"
+        f"&kind={quote(str(kind), safe='')}"
+    )
+
+
 #: A notification's buttons: Android shows three at most.
 MAX_ACTIONS = 3
 ACTION_TITLE_LIMIT = 30
 
 
 def build(kind: str, *, profile: str, bot: str, body: str, key: str, url: str | None = None,
-          actions: list[dict] | None = None) -> dict:
+          actions: list[dict] | None = None, approval: dict | None = None) -> dict:
     """The payload the phone's push library renders by itself while the app is closed.
 
     `url` opens the app where the push is about (the notification is the first tap; Allow / Deny is the second).
@@ -162,6 +173,8 @@ def build(kind: str, *, profile: str, bot: str, body: str, key: str, url: str | 
                if isinstance(a, dict) and str(a.get("url") or "").startswith("hermesbot://") and str(a.get("title") or "").strip()]
     if buttons:
         payload["actions"] = buttons[:MAX_ACTIONS]
+    if approval is not None:
+        payload["approval"] = dict(approval)
     return payload
 
 
@@ -229,9 +242,12 @@ class Dedupe:
 
 
 class Pusher:
-    def __init__(self, store: DeviceStore, post=None, background: bool = True):
+    def __init__(self, store: DeviceStore, post=None, background: bool = True, apns_poster=None, apns_signer=None, apns_config=None):
         self.store = store
         self._post = post
+        self._apns_poster = apns_poster
+        self._apns_signer = apns_signer
+        self._apns_config = apns_config
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hermes-bot-mobile") if background else None
 
     def send(self, kind: str, payload: dict) -> None:
@@ -252,9 +268,46 @@ class Pusher:
         are forgotten."""
         plain = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
 
-        return [self._one(device, kind, plain) for device in self.store.devices() if only is None or device.get("id") == only]
+        return [self._one(device, kind, payload, plain) for device in self.store.devices() if only is None or device.get("id") == only]
 
-    def _one(self, device: dict, kind: str, plain: bytes) -> Delivery:
+    def _one_apns(self, device: dict, kind: str, payload: dict) -> Delivery:
+        identity = device.get("id", "")
+        config = self._apns_config if self._apns_config is not None else apns.load_config(self.store.folder)
+
+        if not config:
+            self.store.record(identity, "apns_not_configured")
+            return Delivery(identity, False, error="apns_not_configured")
+
+        try:
+            status, error = apns.send_apns(
+                device["apns_token"],
+                kind,
+                payload,
+                config,
+                environment=device.get("apns_env"),
+                poster=self._apns_poster,
+                signer=self._apns_signer,
+            )
+        except Exception as failure:
+            err = type(failure).__name__
+            self.store.record(identity, err)
+            return Delivery(identity, False, error=err)
+
+        if error is None and 200 <= status < 300:
+            self.store.record(identity, None)
+            return Delivery(identity, True, status=status)
+
+        if status == 410:
+            self.store.remove(identity)
+            return Delivery(identity, False, status=status, error=error or "gone", gone=True)
+
+        self.store.record(identity, error or f"http {status}")
+        return Delivery(identity, False, status=status, error=error or f"http {status}")
+
+    def _one(self, device: dict, kind: str, payload: dict, plain: bytes) -> Delivery:
+        if device.get("platform") == "apns":
+            return self._one_apns(device, kind, payload)
+
         identity = device.get("id", "")
 
         try:

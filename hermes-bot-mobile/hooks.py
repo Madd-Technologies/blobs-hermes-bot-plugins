@@ -13,10 +13,14 @@ from pathlib import Path
 
 try:
     from . import kanban_approvals, notify
+    from .briefing import BriefingStore
+    from .quiet import QuietHours
     from .store import DeviceStore
 except ImportError:  # the tests import the modules flat
     import kanban_approvals  # type: ignore[no-redef]
     import notify  # type: ignore[no-redef]
+    from briefing import BriefingStore  # type: ignore[no-redef]
+    from quiet import QuietHours  # type: ignore[no-redef]
     from store import DeviceStore  # type: ignore[no-redef]
 
 log = logging.getLogger("hermes-bot-mobile")
@@ -238,10 +242,13 @@ def question_text(args) -> str:
 
 
 class PushHooks:
-    def __init__(self, store: DeviceStore | None = None, pusher: notify.Pusher | None = None, profile=current_profile, name=bot_name, context=turn_context, title=chat_title, routine=routine_name, card=kanban_card, worker=kanban_approvals.worker_context):
+    def __init__(self, store: DeviceStore | None = None, pusher: notify.Pusher | None = None, profile=current_profile, name=bot_name, context=turn_context, title=chat_title, routine=routine_name, card=kanban_card, worker=kanban_approvals.worker_context, quiet: QuietHours | None = None, briefing: BriefingStore | None = None):
         self.store = store or DeviceStore()
         self.pusher = pusher or notify.Pusher(self.store)
+        self.quiet = quiet or QuietHours(self.store.folder)
+        self.briefing = briefing or BriefingStore(self.store.folder)
         self.dedupe = notify.Dedupe()
+        self._briefing_dedupe = notify.Dedupe()
         self._profile = profile
         self._name = name
         self._context = context
@@ -265,7 +272,7 @@ class PushHooks:
 
         return {"chat": chat_id(context["chat"], *ids)}
 
-    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None, slot: str = "", profile: str = "", about: str = "") -> None:
+    def _emit(self, kind: str, key: str, *, detail: str = "", failed: bool = False, session: str = "", target: dict | None = None, slot: str = "", profile: str = "", about: str = "", actions: list[dict] | None = None, approval: dict | None = None) -> None:
         """Push one thing for the person: an approval, a question, a routine that broke, a blocked kanban card, or (only for
         a bot set to `all`) the start of a reply. That a turn finished or a routine ran is never pushed: it shows on Home and in the bot's
         routines, and a buzz for it is noise. `slot` is what a newer push of the same kind replaces (a chat's last reply)."""
@@ -275,6 +282,16 @@ class PushHooks:
         if level == "off" or (kind == "reply" and level != "all"):
             return
 
+        body = notify.lines(kind, detail=detail, failed=failed)
+        target = target or {}
+        # Which chat it is about, by its title, so the notification makes sense without opening it.
+        about = about or (self._title(target.get("chat", "")) if target.get("chat") else "")
+        title = f"{self._name(profile)} · {about}" if about else self._name(profile)
+        url = notify.INBOX if target.get("inbox") else notify.link(profile, chat=target.get("chat", ""), room=target.get("room", ""), page=target.get("page", ""))
+
+        if self._briefing_dedupe.first(f"{kind}:{profile}:{key}"):
+            self.briefing.record_event(kind, profile, body or title, session=session or target.get("chat", ""), url=url, status="failed" if failed else "ok")
+
         # The phone is in front with this chat on screen: the card is already in front of the person. A reply is in front
         # of them as soon as the app is: Home shows it.
         seen = self.store.presence()
@@ -282,16 +299,13 @@ class PushHooks:
         if seen["foreground"] and (kind == "reply" or (session and session in seen["sessions"])):
             return
 
+        if self.quiet.should_suppress(kind):
+            return
+
         if not self.store.devices() or not self.dedupe.first(f"{kind}:{profile}:{key}"):
             return
 
-        body = notify.lines(kind, detail=detail, failed=failed)
-        target = target or {}
-        # Which chat it is about, by its title, so the notification makes sense without opening it.
-        about = about or (self._title(target.get("chat", "")) if target.get("chat") else "")
-        title = f"{self._name(profile)} · {about}" if about else self._name(profile)
-        url = notify.INBOX if target.get("inbox") else notify.link(profile, chat=target.get("chat", ""), room=target.get("room", ""), page=target.get("page", ""))
-        self.pusher.send(kind, notify.build(kind, profile=profile, bot=title, body=body, key=slot or key, url=url))
+        self.pusher.send(kind, notify.build(kind, profile=profile, bot=title, body=body, key=slot or key, url=url, actions=actions, approval=approval))
 
     # -- hooks -------------------------------------------------------------------------------------------------
 
@@ -311,14 +325,28 @@ class PushHooks:
             # bot's main chat, and the push says which card it is for.
             chat = worker.get("chat", "")
             title = notify.tidy(notify.redact(worker.get("title") or ""), 40)
-            self._emit("approval", key, detail=notify.describe(kw.get("description", ""), command), session=chat, target={"chat": chat}, profile=worker.get("profile", ""), about=title)
+            worker_profile = worker.get("profile", "")
+            resolved_profile = worker_profile or self._profile()
+            actions = [
+                {"title": "Allow once", "url": notify.approve_link(key, resolved_profile, "once", "kanban")},
+                {"title": "Deny", "url": notify.approve_link(key, resolved_profile, "deny", "kanban")},
+            ]
+            approval_meta = {"id": key, "profile": resolved_profile, "kind": "kanban", "session": chat}
+            self._emit("approval", key, detail=notify.describe(kw.get("description", ""), command), session=chat, target={"chat": chat}, profile=worker_profile, about=title, actions=actions, approval=approval_meta)
 
             return
 
         # In the dashboard the session key is the chat's persistent id; in the messaging gateway it is not, and then
         # the chat comes from the turn's context.
         target = self._target(session_key, kw.get("session_id"))
-        self._emit("approval", key, detail=notify.describe(kw.get("description", ""), command), session=target.get("chat") or session_key, target=target)
+        resolved_profile = self._profile()
+        approval_session = target.get("chat") or session_key
+        actions = [
+            {"title": "Allow once", "url": notify.approve_link(key, resolved_profile, "once", "session")},
+            {"title": "Deny", "url": notify.approve_link(key, resolved_profile, "deny", "session")},
+        ]
+        approval_meta = {"id": key, "profile": resolved_profile, "kind": "session", "session": approval_session}
+        self._emit("approval", key, detail=notify.describe(kw.get("description", ""), command), session=approval_session, target=target, actions=actions, approval=approval_meta)
 
     def on_tool(self, **kw) -> None:
         if kw.get("tool_name") != "clarify":
@@ -355,12 +383,21 @@ class PushHooks:
         self._emit("reply", f"{chat}:{turn}", detail=notify.preview(answer), session=chat, target=target, slot=chat)
 
     def on_session_end(self, **kw) -> None:
-        # Only a routine that broke: one that ran fine is no news for the phone.
-        if kw.get("platform") != "cron" or kw.get("interrupted") or not kw.get("failed"):
+        if kw.get("platform") != "cron" or kw.get("interrupted"):
             return
 
         session = str(kw.get("session_id") or "")
-        self._emit("routine", session, detail=self._routine(session), failed=True, target={"page": "routines"})
+        name = self._routine(session)
+
+        if not kw.get("failed"):
+            summary = f"Routine “{name}” completed" if name else "Routine completed"
+            profile = self._profile()
+            if self._briefing_dedupe.first(f"routine_ok:{profile}:{session}"):
+                self.briefing.record_event("routine", profile, summary, session=session, url=notify.link(profile, page="routines"), status="ok")
+            return
+
+        # Only a routine that broke pushes: one that ran fine is no news for the phone.
+        self._emit("routine", session, detail=name, failed=True, target={"page": "routines"})
 
     def on_kanban_blocked(self, **kw) -> None:
         # A background worker on the kanban board stopped because it needs its person (it runs headless and can't ask).
